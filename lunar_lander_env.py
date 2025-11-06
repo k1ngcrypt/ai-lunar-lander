@@ -293,8 +293,9 @@ class LunarLanderEnv(gym.Env):
         ScenarioLunarLanderStarter.py without running the scenario's main simulation.
         """
         # Import the classes we need (not the running scenario)
+        from terrain_simulation import LunarRegolithModel
         from ScenarioLunarLanderStarter import (
-            LunarRegolithModel, LIDARSensor, AISensorSuite, 
+            LIDARSensor, AISensorSuite, 
             AdvancedThrusterController
         )
         from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody
