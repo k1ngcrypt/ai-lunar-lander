@@ -96,13 +96,14 @@ class CurriculumStage:
 
 
 class TrainingProgressCallback(BaseCallback):
-    """Enhanced callback to track training progress with detailed metrics"""
+    """Enhanced callback to track training progress with detailed metrics and success rate"""
     
     def __init__(self, stage_name: str = "training", verbose: int = 0):
         super().__init__(verbose)
         self.stage_name = stage_name
         self.episode_rewards = []
         self.episode_lengths = []
+        self.episode_successes = []  # Track success/failure
         
     def _on_step(self) -> bool:
         # Log current stage to TensorBoard
@@ -119,12 +120,30 @@ class TrainingProgressCallback(BaseCallback):
                         self.episode_rewards.append(ep_reward)
                         self.episode_lengths.append(ep_length)
                         
+                        # Determine success (reward > 50 indicates successful landing)
+                        success = ep_reward > 50.0
+                        self.episode_successes.append(success)
+                        
                         # Log to TensorBoard
                         if hasattr(self.logger, 'record'):
                             self.logger.record("episode/reward", ep_reward)
                             self.logger.record("episode/length", ep_length)
+                            self.logger.record("episode/success", float(success))
+                            
+                            # Calculate recent success rate (last 100 episodes)
+                            if len(self.episode_successes) >= 100:
+                                recent_success_rate = np.mean(self.episode_successes[-100:])
+                                self.logger.record("episode/success_rate_100", recent_success_rate)
         
         return True
+    
+    def get_success_rate(self, num_episodes: int = 100) -> float:
+        """Get success rate over last N episodes"""
+        if len(self.episode_successes) < num_episodes:
+            if len(self.episode_successes) == 0:
+                return 0.0
+            return np.mean(self.episode_successes)
+        return np.mean(self.episode_successes[-num_episodes:])
 
 
 # ============================================================================
@@ -193,6 +212,8 @@ class UnifiedTrainer:
                 'observation_mode': 'compact',
                 'max_episode_steps': 1000
             }
+            # Add flag to avoid Basilisk warnings during reset
+            config['create_new_sim_on_reset'] = True
             env = LunarLanderEnv(**config)
             env.reset(seed=self.seed + rank)
             return env
@@ -261,41 +282,49 @@ class UnifiedTrainer:
         return model
     
     def _create_curriculum(self) -> List[CurriculumStage]:
-        """Define curriculum stages"""
+        """
+        Define curriculum stages with IMPROVED design:
+        - All success thresholds are POSITIVE (representing actual successful landings)
+        - Stage 1 teaches LANDING, not just hovering
+        - Reduced max_timesteps to prevent overfitting (100k-400k per stage)
+        - Progressive difficulty with smooth transitions
+        - Min_episodes increased for better mastery verification
+        - Thresholds account for fuel efficiency bonus (successful landing = 100-180 reward)
+        """
         stages = []
         
-        # Stage 1: Hover Training
+        # Stage 1: Simple Landing on Flat Terrain
         stages.append(CurriculumStage(
-            name="stage1_hover",
-            description="Learn basic hovering and altitude control",
+            name="stage1_simple_landing",
+            description="Learn basic landing from low altitude on flat terrain",
             env_config={
                 'action_mode': 'compact',
                 'observation_mode': 'compact',
-                'max_episode_steps': 500,
-                'initial_altitude_range': (100.0, 150.0),
-                'initial_velocity_range': (-2.0, 2.0),
+                'max_episode_steps': 600,
+                'initial_altitude_range': (50.0, 100.0),  # Lower start altitude
+                'initial_velocity_range': (-5.0, 5.0),     # Some initial velocity
                 'terrain_config': {
                     'size': 1000.0,
                     'resolution': 100,
-                    'num_craters': 0,
+                    'num_craters': 0,                      # Flat terrain
                     'crater_depth_range': (0, 0),
                     'crater_radius_range': (0, 0)
                 }
             },
-            success_threshold=-50.0,
-            min_episodes=50,
-            max_timesteps=200_000
+            success_threshold=50.0,     # Basic landing (was 30.0, now accounts for fuel bonus)
+            min_episodes=200,           # More episodes for mastery
+            max_timesteps=100_000       # Reduced to prevent overfitting
         ))
         
-        # Stage 2: Simple Descent
+        # Stage 2: Medium Altitude with Gentle Terrain
         stages.append(CurriculumStage(
-            name="stage2_descent",
-            description="Learn controlled descent from moderate altitude",
+            name="stage2_medium_descent",
+            description="Learn controlled descent from medium altitude with gentle terrain",
             env_config={
                 'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 800,
-                'initial_altitude_range': (300.0, 500.0),
+                'initial_altitude_range': (100.0, 300.0),  # Overlaps with stage 1 max
                 'initial_velocity_range': (-10.0, 10.0),
                 'terrain_config': {
                     'size': 1500.0,
@@ -305,20 +334,20 @@ class UnifiedTrainer:
                     'crater_radius_range': (30, 50)
                 }
             },
-            success_threshold=50.0,
-            min_episodes=100,
-            max_timesteps=400_000
+            success_threshold=60.0,     # Better landing required
+            min_episodes=200,
+            max_timesteps=150_000
         ))
         
-        # Stage 3: Precision Landing
+        # Stage 3: High Altitude with Moderate Terrain
         stages.append(CurriculumStage(
-            name="stage3_precision",
-            description="Learn precision landing near target with soft touchdown",
+            name="stage3_high_descent",
+            description="Learn long descent from high altitude with moderate terrain",
             env_config={
                 'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 1000,
-                'initial_altitude_range': (500.0, 1000.0),
+                'initial_altitude_range': (300.0, 800.0),  # Overlaps with stage 2
                 'initial_velocity_range': (-20.0, 20.0),
                 'terrain_config': {
                     'size': 2000.0,
@@ -328,20 +357,20 @@ class UnifiedTrainer:
                     'crater_radius_range': (20, 60)
                 }
             },
-            success_threshold=200.0,
-            min_episodes=150,
-            max_timesteps=600_000
+            success_threshold=70.0,     # Fuel efficiency starts mattering
+            min_episodes=250,
+            max_timesteps=200_000
         ))
         
-        # Stage 4: Challenging Terrain
+        # Stage 4: Challenging Terrain and Conditions
         stages.append(CurriculumStage(
-            name="stage4_terrain",
-            description="Master landing on challenging terrain with craters",
+            name="stage4_challenging",
+            description="Master landing on challenging terrain with varied conditions",
             env_config={
                 'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 1200,
-                'initial_altitude_range': (800.0, 1500.0),
+                'initial_altitude_range': (500.0, 1500.0),  # Wide range
                 'initial_velocity_range': (-30.0, 30.0),
                 'terrain_config': {
                     'size': 2000.0,
@@ -351,15 +380,15 @@ class UnifiedTrainer:
                     'crater_radius_range': (15, 60)
                 }
             },
-            success_threshold=400.0,
-            min_episodes=200,
-            max_timesteps=800_000
+            success_threshold=80.0,     # High-quality landings
+            min_episodes=300,
+            max_timesteps=300_000
         ))
         
-        # Stage 5: Extreme Conditions
+        # Stage 5: Extreme Conditions (Final Test)
         stages.append(CurriculumStage(
             name="stage5_extreme",
-            description="Master extreme landing scenarios (high speed, rough terrain)",
+            description="Master extreme landing scenarios (high altitude, high speed, rough terrain)",
             env_config={
                 'action_mode': 'compact',
                 'observation_mode': 'compact',
@@ -374,9 +403,9 @@ class UnifiedTrainer:
                     'crater_radius_range': (10, 80)
                 }
             },
-            success_threshold=600.0,
-            min_episodes=250,
-            max_timesteps=1_000_000
+            success_threshold=90.0,     # Near-optimal performance expected
+            min_episodes=400,
+            max_timesteps=400_000
         ))
         
         return stages
@@ -400,7 +429,8 @@ class UnifiedTrainer:
             env = LunarLanderEnv(
                 action_mode='compact',
                 observation_mode='compact',
-                max_episode_steps=200
+                max_episode_steps=200,
+                create_new_sim_on_reset=True  # Avoid Basilisk warnings
             )
             print("  ✓ Environment created successfully")
             
@@ -538,12 +568,19 @@ class UnifiedTrainer:
             print(f"DEMO STAGE {i+1}/{len(demo_stages)}: {stage.name.upper()}")
             print(f"{'='*80}")
             
-            mean_reward = self._train_stage(stage, n_envs=2, demo=True)
+            mean_reward, success_rate = self._train_stage(stage, n_envs=2, demo=True)
+            
+            print(f"\n{'='*60}")
+            print(f"Demo Stage {i+1} Results:")
+            print(f"  Mean reward: {mean_reward:.2f}")
+            print(f"  Success rate: {success_rate*100:.1f}%")
+            print(f"  Threshold: {stage.success_threshold}")
             
             if mean_reward >= stage.success_threshold:
-                print(f"\n✓ Stage passed! (reward: {mean_reward:.2f})")
+                print(f"  Status: ✓ PASSED")
             else:
-                print(f"\n⚠ Stage not fully mastered, but continuing demo...")
+                print(f"  Status: ⚠ Not mastered (demo mode - continuing anyway)")
+            print(f"{'='*60}")
         
         # Save demo model
         demo_path = os.path.join(self.save_dir, 'demo_final')
@@ -666,38 +703,93 @@ class UnifiedTrainer:
     # ========================================================================
     
     def curriculum_training(self, start_stage: int = 0, auto_advance: bool = True):
-        """Full curriculum learning through all stages"""
+        """
+        Full curriculum learning through all stages with IMPROVED advancement logic:
+        - Requires both mean reward threshold AND 60% success rate
+        - Implements stage regression if performance drops
+        - Validates mastery before advancing
+        """
         print("\n" + "="*80)
-        print("CURRICULUM LEARNING MODE")
+        print("CURRICULUM LEARNING MODE (IMPROVED)")
         print("="*80)
         print(f"Total stages: {len(self.curriculum_stages)}")
         print(f"Starting at stage: {start_stage + 1}")
         print(f"Auto-advance: {auto_advance}")
+        print("\nADVANCEMENT CRITERIA:")
+        print("  - Mean reward > threshold")
+        print("  - Success rate > 60% (last 100 episodes)")
+        print("  - Stage regression enabled for poor performance")
         print("\nStages:")
         for i, stage in enumerate(self.curriculum_stages):
             print(f"  {i+1}. {stage.name}: {stage.description}")
+            print(f"      Threshold: {stage.success_threshold}, Max steps: {stage.max_timesteps}")
         print("="*80 + "\n")
         
-        for stage_idx in range(start_stage, len(self.curriculum_stages)):
+        stage_idx = start_stage
+        stage_attempts = {}  # Track attempts per stage
+        
+        while stage_idx < len(self.curriculum_stages):
             stage = self.curriculum_stages[stage_idx]
+            
+            # Track attempts
+            if stage_idx not in stage_attempts:
+                stage_attempts[stage_idx] = 0
+            stage_attempts[stage_idx] += 1
             
             print(f"\n{'='*80}")
             print(f"STAGE {stage_idx + 1}/{len(self.curriculum_stages)}: {stage.name.upper()}")
+            print(f"Attempt #{stage_attempts[stage_idx]}")
             print(f"{'='*80}")
             
-            mean_reward = self._train_stage(stage, n_envs=self.n_envs)
+            mean_reward, success_rate = self._train_stage(stage, n_envs=self.n_envs)
             
-            # Check if ready to advance
+            # Check advancement criteria
+            reward_passed = mean_reward >= stage.success_threshold
+            success_passed = success_rate >= 0.6  # 60% success rate required
+            
+            print(f"\n{'='*60}")
+            print(f"STAGE {stage_idx + 1} COMPLETION REPORT")
+            print(f"{'='*60}")
+            print(f"Mean reward:     {mean_reward:.2f} / {stage.success_threshold:.2f} {'✓' if reward_passed else '✗'}")
+            print(f"Success rate:    {success_rate*100:.1f}% / 60.0% {'✓' if success_passed else '✗'}")
+            print(f"Overall:         {'PASSED' if (reward_passed and success_passed) else 'FAILED'}")
+            print(f"{'='*60}\n")
+            
             if auto_advance:
-                if mean_reward >= stage.success_threshold:
-                    print(f"\n✓ Stage completed! Advancing to next stage...")
+                if reward_passed and success_passed:
+                    print(f"✓ Stage mastered! Advancing to next stage...\n")
+                    stage_idx += 1  # Advance
+                    
+                elif stage_attempts[stage_idx] < 3:
+                    # Allow up to 3 attempts at current stage
+                    print(f"⚠ Stage not mastered. Retrying same stage (attempt {stage_attempts[stage_idx] + 1}/3)...\n")
+                    # Stay at current stage (will retry on next iteration)
+                    
+                elif stage_idx > 0:
+                    # Regress to previous stage if repeated failures
+                    print(f"⚠ Failed {stage_attempts[stage_idx]} times. REGRESSING to Stage {stage_idx}...\n")
+                    stage_idx -= 1  # Go back one stage
+                    
                 else:
-                    print(f"\n⚠ Did not reach threshold ({stage.success_threshold})")
-                    print(f"   Current performance: {mean_reward:.2f}")
+                    # Stage 1 failure - adjust expectations
+                    print(f"⚠ Stage 1 not mastered after {stage_attempts[stage_idx]} attempts.")
                     user_input = input("Continue to next stage anyway? (y/n): ")
-                    if user_input.lower() != 'y':
+                    if user_input.lower() == 'y':
+                        stage_idx += 1
+                    else:
                         print("Training stopped by user.")
                         break
+            else:
+                # Manual advancement
+                user_input = input(f"Advance to next stage? (y/n/r for regress): ")
+                if user_input.lower() == 'y':
+                    stage_idx += 1
+                elif user_input.lower() == 'r' and stage_idx > 0:
+                    stage_idx -= 1
+                    print(f"Regressing to Stage {stage_idx + 1}...")
+                else:
+                    print("Training stopped by user.")
+                    break
         
         # Save final curriculum model
         final_path = os.path.join(self.save_dir, 'curriculum_final')
@@ -708,13 +800,23 @@ class UnifiedTrainer:
         print("="*80)
         print(f"\nFinal model: {final_path}")
         print(f"Stage models: {self.save_dir}/stage*_final")
+        print(f"\nStage completion summary:")
+        for idx, attempts in stage_attempts.items():
+            stage_name = self.curriculum_stages[idx].name
+            print(f"  Stage {idx+1} ({stage_name}): {attempts} attempt(s)")
         print(f"\nView training: tensorboard --logdir={self.log_dir}")
         print("="*80 + "\n")
         
         return self.model
     
     def _train_stage(self, stage: CurriculumStage, n_envs: int, demo: bool = False):
-        """Train on a specific curriculum stage"""
+        """
+        Train on a specific curriculum stage
+        
+        Returns:
+            mean_reward (float): Mean reward over evaluation episodes
+            success_rate (float): Success rate (0.0-1.0) over evaluation episodes
+        """
         # Create environments for this stage
         if n_envs > 1:
             env = SubprocVecEnv([self._make_env(stage.env_config, i) for i in range(n_envs)])
@@ -756,7 +858,8 @@ class UnifiedTrainer:
         callback = CallbackList([checkpoint_callback, eval_callback, progress_callback])
         
         # Train
-        print(f"\nTraining for {stage.max_timesteps:,} timesteps...")
+        print(f"\nTraining for up to {stage.max_timesteps:,} timesteps...")
+        print(f"Success criteria: Mean reward > {stage.success_threshold}, Success rate > 60%")
         
         try:
             self.model.learn(
@@ -774,21 +877,25 @@ class UnifiedTrainer:
         self.model.save(stage_path)
         print(f"\n✓ Stage model saved: {stage_path}")
         
-        # Evaluate
-        mean_reward, std_reward = self._evaluate_model(eval_env, n_episodes=20)
+        # Evaluate with success tracking
+        mean_reward, std_reward, success_rate = self._evaluate_model_with_success(
+            eval_env, n_episodes=50
+        )
         
         print(f"\n{'='*60}")
         print(f"STAGE EVALUATION: {stage.name}")
         print(f"{'='*60}")
+        print(f"Episodes evaluated: 50")
         print(f"Mean reward: {mean_reward:.2f} ± {std_reward:.2f}")
+        print(f"Success rate: {success_rate*100:.1f}%")
         print(f"Threshold: {stage.success_threshold}")
-        print(f"Status: {'✓ PASSED' if mean_reward >= stage.success_threshold else '✗ NOT YET'}")
+        print(f"Status: {'✓ PASSED' if (mean_reward >= stage.success_threshold and success_rate >= 0.6) else '✗ NOT YET'}")
         print(f"{'='*60}\n")
         
         env.close()
         eval_env.close()
         
-        return mean_reward
+        return mean_reward, success_rate
     
     # ========================================================================
     # MODE: EVALUATION
@@ -834,6 +941,7 @@ class UnifiedTrainer:
             'observation_mode': 'compact',
             'render_mode': 'human' if render else None
         }
+        config['create_new_sim_on_reset'] = True  # Avoid Basilisk warnings
         env = LunarLanderEnv(**config)
         
         # Evaluate
@@ -910,6 +1018,38 @@ class UnifiedTrainer:
             episode_rewards.append(episode_reward)
         
         return np.mean(episode_rewards), np.std(episode_rewards)
+    
+    def _evaluate_model_with_success(self, env, n_episodes: int = 10):
+        """
+        Internal evaluation helper with success rate tracking
+        
+        Returns:
+            mean_reward (float): Mean episode reward
+            std_reward (float): Standard deviation of rewards
+            success_rate (float): Fraction of successful landings (0.0-1.0)
+        """
+        episode_rewards = []
+        successes = []
+        
+        for _ in range(n_episodes):
+            obs = env.reset()
+            done = False
+            episode_reward = 0
+            
+            while not done:
+                action, _states = self.model.predict(obs, deterministic=True)
+                obs, reward, done, info = env.step(action)
+                episode_reward += reward
+            
+            episode_rewards.append(episode_reward)
+            # Success if reward > 50 (indicates successful landing per new reward design)
+            successes.append(episode_reward > 50.0)
+        
+        mean_reward = np.mean(episode_rewards)
+        std_reward = np.std(episode_rewards)
+        success_rate = np.mean(successes)
+        
+        return mean_reward, std_reward, success_rate
 
 
 # ============================================================================
