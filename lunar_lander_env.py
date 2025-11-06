@@ -5,12 +5,15 @@ Gymnasium Environment Wrapper for Basilisk Lunar Lander
 This module provides a Gymnasium-compatible environment for training RL agents
 on the lunar landing task using Stable Baselines3.
 
+This is a lightweight wrapper around ScenarioLunarLanderStarter.py that provides
+the Gymnasium interface for reinforcement learning.
+
 Features:
 - Full Gymnasium API compatibility (step, reset, render)
 - Configurable observation and action spaces
 - Reward shaping for landing task
 - Episode termination conditions
-- Integration with Basilisk simulation
+- Reuses ScenarioLunarLanderStarter simulation components
 """
 
 import numpy as np
@@ -23,19 +26,18 @@ import os
 basiliskPath = os.path.join(os.path.dirname(__file__), 'basilisk', 'dist3')
 sys.path.insert(0, basiliskPath)
 
-from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody
-from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank
-from ScenarioLunarLanderStarter import (
-    LunarRegolithModel, LIDARSensor, AISensorSuite, 
-    AdvancedThrusterController
-)
+from Basilisk.utilities import macros
 
 
 class LunarLanderEnv(gym.Env):
     """
     Gymnasium Environment for Starship HLS Lunar Landing
     
+    This environment wraps the ScenarioLunarLanderStarter simulation
+    and provides a standard Gymnasium interface for RL training.
+    
     Observation Space:
+        Compact mode (23D):
         - Position (3): [x, y, altitude_terrain]
         - Velocity (3): [vx, vy, vz]
         - Attitude (4): quaternion [qx, qy, qz, qw]
@@ -43,17 +45,17 @@ class LunarLanderEnv(gym.Env):
         - Fuel fraction (1): remaining fuel [0-1]
         - LIDAR stats (3): [min_range, mean_range, std_range]
         - IMU current (6): [ax, ay, az, gx, gy, gz]
-        Total: 23 dimensions (can be extended to full sensor suite)
+        
+        Full mode (200+D): Complete sensor suite with history
     
     Action Space:
-        - Primary thrusters (3): throttle [0.4-1.0] for each engine
-        - RCS thrusters (6): simplified control [-1, 1] for pitch/yaw/roll torques
-        Total: 9 dimensions (continuous)
-        
-        Alternative compact action space:
+        Compact mode (4D):
         - Main throttle (1): average throttle [0.4-1.0]
         - Attitude control (3): [pitch, yaw, roll] torque commands [-1, 1]
-        Total: 4 dimensions
+        
+        Full mode (9D):
+        - Primary thrusters (3): throttle [0.4-1.0] for each engine
+        - RCS thrusters (6): simplified control [-1, 1]
     """
     
     metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 10}
@@ -91,19 +93,20 @@ class LunarLanderEnv(gym.Env):
         self.current_step = 0
         self.episode_count = 0
         
-        # Simulation components (initialized in _create_simulation)
-        self.scSim = None
-        self.lander = None
-        self.terrain = None
-        self.lidar = None
-        self.aiSensors = None
-        self.thrController = None
-        self.ch4Tank = None
-        self.loxTank = None
-        
         # Simulation parameters
         self.dt = 0.1  # Simulation timestep (seconds)
-        self.fsw_dt = 0.5  # FSW update rate (seconds)
+        
+        # Terrain configuration
+        if terrain_config is None:
+            self.terrain_config = {
+                'size': 2000.0,
+                'resolution': 200,
+                'num_craters': 15,
+                'crater_depth_range': (3, 12),
+                'crater_radius_range': (15, 60)
+            }
+        else:
+            self.terrain_config = terrain_config
         
         # Define action space
         if self.action_mode == 'compact':
@@ -127,7 +130,7 @@ class LunarLanderEnv(gym.Env):
         else:
             raise ValueError(f"Unknown action_mode: {self.action_mode}")
         
-        # Define observation space
+        # Define observation space (will be finalized after simulation setup)
         if self.observation_mode == 'compact':
             # Compact: 23D observation
             self.observation_space = spaces.Box(
@@ -136,31 +139,33 @@ class LunarLanderEnv(gym.Env):
                 shape=(23,),
                 dtype=np.float32
             )
-        elif self.observation_mode == 'full':
-            # Full: ~200+ D with history and LIDAR
-            # Will be determined after simulation setup
-            self.observation_space = None  # Set in _create_simulation
         else:
-            raise ValueError(f"Unknown observation_mode: {self.observation_mode}")
+            # Will be set in _create_simulation
+            self.observation_space = None
         
         # Target landing zone
         self.target_position = np.array([0.0, 0.0, 0.0])
         self.target_velocity = np.array([0.0, 0.0, 0.0])
         
-        # Terrain configuration
-        if terrain_config is None:
-            self.terrain_config = {
-                'size': 2000.0,
-                'resolution': 200,
-                'num_craters': 15,
-                'crater_depth_range': (3, 12),
-                'crater_radius_range': (15, 60)
-            }
-        else:
-            self.terrain_config = terrain_config
+        # Simulation components (will be set in _create_simulation)
+        self.scenario_initialized = False
+        self.scSim = None
+        self.lander = None
+        self.terrain = None
+        self.aiSensors = None
+        self.thrController = None
         
         # Initialize simulation
         self._create_simulation()
+        
+        if self.observation_mode == 'full' and self.aiSensors is not None:
+            obs_size = self.aiSensors.get_observation_space_size()
+            self.observation_space = spaces.Box(
+                low=-np.inf,
+                high=np.inf,
+                shape=(obs_size,),
+                dtype=np.float32
+            )
         
         print(f"\n{'='*60}")
         print("Lunar Lander Gymnasium Environment Initialized")
@@ -172,7 +177,20 @@ class LunarLanderEnv(gym.Env):
         print(f"{'='*60}\n")
     
     def _create_simulation(self):
-        """Create Basilisk simulation environment"""
+        """
+        Create Basilisk simulation environment using components from ScenarioLunarLanderStarter
+        
+        This method creates a fresh simulation using the classes defined in
+        ScenarioLunarLanderStarter.py without running the scenario's main simulation.
+        """
+        # Import the classes we need (not the running scenario)
+        from ScenarioLunarLanderStarter import (
+            LunarRegolithModel, LIDARSensor, AISensorSuite, 
+            AdvancedThrusterController
+        )
+        from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody
+        from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
+        
         # Create simulation base
         self.scSim = SimulationBaseClass.SimBaseClass()
         
@@ -183,7 +201,7 @@ class LunarLanderEnv(gym.Env):
         
         dynProcess = self.scSim.CreateNewProcess(simProcessName)
         simulationTimeStep = macros.sec2nano(self.dt)
-        fswTimeStep = macros.sec2nano(self.fsw_dt)
+        fswTimeStep = macros.sec2nano(0.5)
         
         dynProcess.addTask(self.scSim.CreateNewTask(dynTaskName, simulationTimeStep))
         dynProcess.addTask(self.scSim.CreateNewTask(fswTaskName, fswTimeStep))
@@ -196,7 +214,6 @@ class LunarLanderEnv(gym.Env):
         self.lander.hub.IHubPntBc_B = np.array([[231513125.0, 0.0, 0.0],
                                                 [0.0, 231513125.0, 0.0],
                                                 [0.0, 0.0, 14276250.0]])
-        # Initial state will be set in reset()
         self.lander.hub.r_CN_NInit = np.array([0., 0., 1500.0])
         self.lander.hub.v_CN_NInit = np.array([0., 0., -10.0])
         self.lander.hub.sigma_BNInit = np.array([0., 0., 0.])
@@ -205,7 +222,31 @@ class LunarLanderEnv(gym.Env):
         self.scSim.AddModelToTask(dynTaskName, self.lander)
         
         # Create fuel tanks
-        self._create_fuel_tanks(dynTaskName)
+        self.ch4Tank = fuelTank.FuelTank()
+        self.ch4Tank.ModelTag = "CH4_Tank"
+        ch4TankModel = fuelTank.FuelTankModelConstantVolume()
+        ch4TankModel.propMassInit = 260869.565
+        ch4TankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
+        ch4TankRadius = (3.0 * 617.005 / (4.0 * np.pi)) ** (1.0/3.0)
+        ch4TankModel.radiusTankInit = ch4TankRadius
+        self.ch4Tank.setTankModel(ch4TankModel)
+        self.ch4Tank.r_TB_B = [[0.0], [0.0], [-10.0]]
+        self.ch4Tank.nameOfMassState = "ch4TankMass"
+        self.lander.addStateEffector(self.ch4Tank)
+        self.scSim.AddModelToTask(dynTaskName, self.ch4Tank)
+        
+        self.loxTank = fuelTank.FuelTank()
+        self.loxTank.ModelTag = "LOX_Tank"
+        loxTankModel = fuelTank.FuelTankModelConstantVolume()
+        loxTankModel.propMassInit = 939130.435
+        loxTankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
+        loxTankRadius = (3.0 * 823.077 / (4.0 * np.pi)) ** (1.0/3.0)
+        loxTankModel.radiusTankInit = loxTankRadius
+        self.loxTank.setTankModel(loxTankModel)
+        self.loxTank.r_TB_B = [[0.0], [0.0], [-5.0]]
+        self.loxTank.nameOfMassState = "loxTankMass"
+        self.lander.addStateEffector(self.loxTank)
+        self.scSim.AddModelToTask(dynTaskName, self.loxTank)
         
         # Setup gravity
         gravFactory = simIncludeGravBody.gravBodyFactory()
@@ -219,7 +260,6 @@ class LunarLanderEnv(gym.Env):
             resolution=self.terrain_config['resolution']
         )
         
-        # Try to load terrain, otherwise generate
         terrainDataPath = os.path.join(os.path.dirname(__file__), 
                                       'generated_terrain', 'moon_terrain.npy')
         if not self.terrain.load_terrain_from_file(terrainDataPath):
@@ -230,7 +270,115 @@ class LunarLanderEnv(gym.Env):
             )
         
         # Create thrusters
-        self._create_thrusters(dynTaskName)
+        self.primaryEff = thrusterStateEffector.ThrusterStateEffector()
+        self.primaryEff.ModelTag = "PrimaryThrusters"
+        self.scSim.AddModelToTask(dynTaskName, self.primaryEff)
+        self.lander.addStateEffector(self.primaryEff)
+        
+        self.midbodyEff = thrusterStateEffector.ThrusterStateEffector()
+        self.midbodyEff.ModelTag = "MidBodyThrusters"
+        self.scSim.AddModelToTask(dynTaskName, self.midbodyEff)
+        self.lander.addStateEffector(self.midbodyEff)
+        
+        self.rcsEff = thrusterStateEffector.ThrusterStateEffector()
+        self.rcsEff.ModelTag = "RCSThrusters"
+        self.scSim.AddModelToTask(dynTaskName, self.rcsEff)
+        self.lander.addStateEffector(self.rcsEff)
+        
+        # Add primary engines
+        vacuumIsp = 375.0
+        g0 = 9.80665
+        maxThrustPerEngine = 2500000.0
+        perEngineMassFlow = maxThrustPerEngine / (vacuumIsp * g0)
+        mixtureRatio = 3.6
+        ch4FlowPerEngine = perEngineMassFlow / (1.0 + mixtureRatio)
+        loxFlowPerEngine = perEngineMassFlow * mixtureRatio / (1.0 + mixtureRatio)
+        
+        enginePositions = [
+            np.array([3.500, 0.000, -24.500]),
+            np.array([-1.750, 3.031, -24.500]),
+            np.array([-1.750, -3.031, -24.500])
+        ]
+        
+        for pos in enginePositions:
+            thr = thrusterStateEffector.THRSimConfig()
+            thr.thrLoc_B = np.array(pos, dtype=float)
+            thr.thrDir_B = np.array([0., 0., 1.])
+            thr.MaxThrust = maxThrustPerEngine
+            thr.steadyIsp = vacuumIsp
+            self.primaryEff.addThruster(thr, self.lander.scStateOutMsg)
+        
+        # Add mid-body thrusters
+        midBodyPositions = [
+            np.array([4.000, 0.000, 0.000]),
+            np.array([3.464, 2.000, 0.000]),
+            np.array([2.000, 3.464, 0.000]),
+            np.array([0.000, 4.000, 0.000]),
+            np.array([-2.000, 3.464, 0.000]),
+            np.array([-3.464, 2.000, 0.000]),
+            np.array([-4.000, 0.000, 0.000]),
+            np.array([-3.464, -2.000, 0.000]),
+            np.array([-2.000, -3.464, 0.000]),
+            np.array([0.000, -4.000, 0.000]),
+            np.array([2.000, -3.464, 0.000]),
+            np.array([3.464, -2.000, 0.000])
+        ]
+        
+        for pos in midBodyPositions:
+            direction = np.array([pos[0], pos[1], 0.0])
+            direction = direction / np.linalg.norm(direction)
+            thr = thrusterStateEffector.THRSimConfig()
+            thr.thrLoc_B = np.array(pos, dtype=float)
+            thr.thrDir_B = np.array(direction, dtype=float)
+            thr.MaxThrust = 20000.0
+            thr.steadyIsp = vacuumIsp
+            self.midbodyEff.addThruster(thr, self.lander.scStateOutMsg)
+        
+        # Add RCS thrusters
+        rcsPositions = [
+            np.array([4.200, 0.000, 22.500]),
+            np.array([3.637, 2.100, 22.500]),
+            np.array([2.100, 3.637, 22.500]),
+            np.array([0.000, 4.200, 22.500]),
+            np.array([-2.100, 3.637, 22.500]),
+            np.array([-3.637, 2.100, 22.500]),
+            np.array([-4.200, 0.000, 22.500]),
+            np.array([-3.637, -2.100, 22.500]),
+            np.array([-2.100, -3.637, 22.500]),
+            np.array([0.000, -4.200, 22.500]),
+            np.array([2.100, -3.637, 22.500]),
+            np.array([3.637, -2.100, 22.500]),
+            np.array([4.200, 0.000, -22.500]),
+            np.array([3.637, 2.100, -22.500]),
+            np.array([2.100, 3.637, -22.500]),
+            np.array([0.000, 4.200, -22.500]),
+            np.array([-2.100, 3.637, -22.500]),
+            np.array([-3.637, 2.100, -22.500]),
+            np.array([-4.200, 0.000, -22.500]),
+            np.array([-3.637, -2.100, -22.500]),
+            np.array([-2.100, -3.637, -22.500]),
+            np.array([0.000, -4.200, -22.500]),
+            np.array([2.100, -3.637, -22.500]),
+            np.array([3.637, -2.100, -22.500])
+        ]
+        
+        for pos in rcsPositions:
+            direction = np.array([pos[0], pos[1], 0.0])
+            direction = direction / np.linalg.norm(direction)
+            thr = thrusterStateEffector.THRSimConfig()
+            thr.thrLoc_B = np.array(pos, dtype=float)
+            thr.thrDir_B = np.array(direction, dtype=float)
+            thr.MaxThrust = 2000.0
+            thr.steadyIsp = vacuumIsp
+            self.rcsEff.addThruster(thr, self.lander.scStateOutMsg)
+        
+        # Connect fuel tanks
+        self.ch4Tank.addThrusterSet(self.primaryEff)
+        self.ch4Tank.addThrusterSet(self.midbodyEff)
+        self.ch4Tank.addThrusterSet(self.rcsEff)
+        self.loxTank.addThrusterSet(self.primaryEff)
+        self.loxTank.addThrusterSet(self.midbodyEff)
+        self.loxTank.addThrusterSet(self.rcsEff)
         
         # Create IMU
         self.imu = imuSensor.ImuSensor()
@@ -264,19 +412,19 @@ class LunarLanderEnv(gym.Env):
         )
         
         # Create terrain force effector
-        from Basilisk.simulation import extForceTorque
         self.terrainForceEff = extForceTorque.ExtForceTorque()
         self.terrainForceEff.ModelTag = "TerrainContactForce"
         self.scSim.AddModelToTask(dynTaskName, self.terrainForceEff)
         self.lander.addDynamicEffector(self.terrainForceEff)
         
         # Create thruster controller
+        # Note: This is a Python helper class, not a SysModel, so we don't add it to task
+        # We'll call Update() manually in step()
         self.thrController = AdvancedThrusterController(
             self.primaryEff, self.midbodyEff, self.rcsEff,
             self.ch4Tank, self.loxTank, self.terrain, 
             self.terrainForceEff, self.lander
         )
-        self.scSim.AddModelToTask(fswTaskName, self.thrController)
         
         # Connect messages
         self.primaryEff.cmdsInMsg.subscribeTo(self.thrController.primCmdMsg)
@@ -289,148 +437,12 @@ class LunarLanderEnv(gym.Env):
         # Initialize simulation
         self.scSim.InitializeSimulation()
         
-        # Update observation space if full mode
-        if self.observation_mode == 'full':
-            obs_size = self.aiSensors.get_observation_space_size()
-            self.observation_space = spaces.Box(
-                low=-np.inf,
-                high=np.inf,
-                shape=(obs_size,),
-                dtype=np.float32
-            )
-    
-    def _create_fuel_tanks(self, taskName):
-        """Create CH4 and LOX fuel tanks"""
-        # CH4 Tank
-        self.ch4Tank = fuelTank.FuelTank()
-        self.ch4Tank.ModelTag = "CH4_Tank"
-        ch4TankModel = fuelTank.FuelTankModelConstantVolume()
-        ch4TankModel.propMassInit = 260869.565
-        ch4TankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
-        ch4TankRadius = (3.0 * 617.005 / (4.0 * np.pi)) ** (1.0/3.0)
-        ch4TankModel.radiusTankInit = ch4TankRadius
-        self.ch4Tank.setTankModel(ch4TankModel)
-        self.ch4Tank.r_TB_B = [[0.0], [0.0], [-10.0]]
-        self.ch4Tank.nameOfMassState = "ch4TankMass"
-        self.lander.addStateEffector(self.ch4Tank)
-        self.scSim.AddModelToTask(taskName, self.ch4Tank)
+        self.scenario_initialized = True
         
-        # LOX Tank
-        self.loxTank = fuelTank.FuelTank()
-        self.loxTank.ModelTag = "LOX_Tank"
-        loxTankModel = fuelTank.FuelTankModelConstantVolume()
-        loxTankModel.propMassInit = 939130.435
-        loxTankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
-        loxTankRadius = (3.0 * 823.077 / (4.0 * np.pi)) ** (1.0/3.0)
-        loxTankModel.radiusTankInit = loxTankRadius
-        self.loxTank.setTankModel(loxTankModel)
-        self.loxTank.r_TB_B = [[0.0], [0.0], [-5.0]]
-        self.loxTank.nameOfMassState = "loxTankMass"
-        self.lander.addStateEffector(self.loxTank)
-        self.scSim.AddModelToTask(taskName, self.loxTank)
-    
-    def _create_thrusters(self, taskName):
-        """Create thruster effectors"""
-        # Create separate effectors for each group
-        self.primaryEff = thrusterStateEffector.ThrusterStateEffector()
-        self.primaryEff.ModelTag = "PrimaryThrusters"
-        self.scSim.AddModelToTask(taskName, self.primaryEff)
-        self.lander.addStateEffector(self.primaryEff)
-        
-        self.midbodyEff = thrusterStateEffector.ThrusterStateEffector()
-        self.midbodyEff.ModelTag = "MidBodyThrusters"
-        self.scSim.AddModelToTask(taskName, self.midbodyEff)
-        self.lander.addStateEffector(self.midbodyEff)
-        
-        self.rcsEff = thrusterStateEffector.ThrusterStateEffector()
-        self.rcsEff.ModelTag = "RCSThrusters"
-        self.scSim.AddModelToTask(taskName, self.rcsEff)
-        self.lander.addStateEffector(self.rcsEff)
-        
-        # Add primary engines
-        vacuumIsp = 375.0
-        g0 = 9.80665
-        maxThrustPerEngine = 2500000.0
-        perEngineMassFlow = maxThrustPerEngine / (vacuumIsp * g0)
-        mixtureRatio = 3.6
-        ch4FlowPerEngine = perEngineMassFlow / (1.0 + mixtureRatio)
-        loxFlowPerEngine = perEngineMassFlow * mixtureRatio / (1.0 + mixtureRatio)
-        
-        enginePositions = [
-            np.array([3.500, 0.000, -24.500]),
-            np.array([-1.750, 3.031, -24.500]),
-            np.array([-1.750, -3.031, -24.500])
-        ]
-        
-        for pos in enginePositions:
-            thr = thrusterStateEffector.THRConfigSimMsg()
-            thr.thrusterLocation = pos
-            thr.thrusterDirection = np.array([0., 0., 1.])
-            thr.MaxThrust = maxThrustPerEngine
-            thrusterStateEffector.THRConfig_addTank(thr, self.ch4Tank.fuelTankOutMsg, 
-                                                   ch4FlowPerEngine)
-            thrusterStateEffector.THRConfig_addTank(thr, self.loxTank.fuelTankOutMsg, 
-                                                   loxFlowPerEngine)
-            self.primaryEff.addThruster(thr)
-        
-        # Add mid-body thrusters (simplified - just a few for attitude control)
-        # For RL, we'll use a subset to reduce complexity
-        midBodyPositions = [
-            np.array([4.000, 0.000, 0.000]),
-            np.array([0.000, 4.000, 0.000]),
-            np.array([-4.000, 0.000, 0.000]),
-            np.array([0.000, -4.000, 0.000])
-        ]
-        
-        for pos in midBodyPositions:
-            thr = thrusterStateEffector.THRConfigSimMsg()
-            thr.thrusterLocation = pos
-            direction = np.array([pos[0], pos[1], 0.0])
-            direction = direction / np.linalg.norm(direction)
-            thr.thrusterDirection = direction
-            thr.MaxThrust = 20000.0
-            
-            midBodyMassFlow = 20000.0 / (vacuumIsp * g0)
-            ch4FlowMid = midBodyMassFlow / (1.0 + mixtureRatio)
-            loxFlowMid = midBodyMassFlow * mixtureRatio / (1.0 + mixtureRatio)
-            
-            thrusterStateEffector.THRConfig_addTank(thr, self.ch4Tank.fuelTankOutMsg, 
-                                                   ch4FlowMid)
-            thrusterStateEffector.THRConfig_addTank(thr, self.loxTank.fuelTankOutMsg, 
-                                                   loxFlowMid)
-            self.midbodyEff.addThruster(thr)
-        
-        # Add RCS thrusters (simplified - 8 thrusters in two rings)
-        rcsPositions = [
-            # Top ring
-            np.array([4.200, 0.000, 22.500]),
-            np.array([0.000, 4.200, 22.500]),
-            np.array([-4.200, 0.000, 22.500]),
-            np.array([0.000, -4.200, 22.500]),
-            # Bottom ring
-            np.array([4.200, 0.000, -22.500]),
-            np.array([0.000, 4.200, -22.500]),
-            np.array([-4.200, 0.000, -22.500]),
-            np.array([0.000, -4.200, -22.500])
-        ]
-        
-        for pos in rcsPositions:
-            thr = thrusterStateEffector.THRConfigSimMsg()
-            thr.thrusterLocation = pos
-            direction = np.array([pos[0], pos[1], 0.0])
-            direction = direction / np.linalg.norm(direction)
-            thr.thrusterDirection = direction
-            thr.MaxThrust = 2000.0
-            
-            rcsMassFlow = 2000.0 / (vacuumIsp * g0)
-            ch4FlowRcs = rcsMassFlow / (1.0 + mixtureRatio)
-            loxFlowRcs = rcsMassFlow * mixtureRatio / (1.0 + mixtureRatio)
-            
-            thrusterStateEffector.THRConfig_addTank(thr, self.ch4Tank.fuelTankOutMsg, 
-                                                   ch4FlowRcs)
-            thrusterStateEffector.THRConfig_addTank(thr, self.loxTank.fuelTankOutMsg, 
-                                                   loxFlowRcs)
-            self.rcsEff.addThruster(thr)
+        print(f"✓ Simulation initialized using ScenarioLunarLanderStarter classes")
+        print(f"  Terrain: {self.terrain.size}m x {self.terrain.size}m")
+        print(f"  LIDAR: {self.lidar.num_rays} rays, {self.lidar.max_range}m range")
+        print(f"  Sensors: Ready (observation dim: {self.aiSensors.get_observation_space_size()})")
     
     def _get_observation(self):
         """Get current observation from sensors"""
@@ -649,10 +661,6 @@ class LunarLanderEnv(gym.Env):
         self.lander.hub.sigma_BNInit = attitude_mrp
         self.lander.hub.omega_BN_BInit = omega
         
-        # Reset fuel tanks to full
-        self.ch4Tank.fuelTankOutMsg.recorder().clear()
-        self.loxTank.fuelTankOutMsg.recorder().clear()
-        
         # Re-initialize simulation
         self.scSim.InitializeSimulation()
         
@@ -697,45 +705,43 @@ class LunarLanderEnv(gym.Env):
             primary_throttles = np.array([main_throttle] * 3)
             
             # Convert torque commands to RCS thruster activations
-            # This is a simplified mapping - in reality would need proper
-            # allocation based on thruster positions and moment arms
-            rcs_throttles = np.zeros(8)  # We have 8 RCS thrusters
+            # This is a simplified mapping
+            rcs_throttles = np.zeros(24)  # We have 24 RCS thrusters
             
             # Pitch control (torque_cmd[0]): use top/bottom thrusters
             if torque_cmd[0] > 0:
-                rcs_throttles[0] = abs(torque_cmd[0])  # Top front
-                rcs_throttles[6] = abs(torque_cmd[0])  # Bottom back
+                rcs_throttles[0] = abs(torque_cmd[0])
+                rcs_throttles[14] = abs(torque_cmd[0])
             else:
-                rcs_throttles[2] = abs(torque_cmd[0])  # Top back
-                rcs_throttles[4] = abs(torque_cmd[0])  # Bottom front
+                rcs_throttles[6] = abs(torque_cmd[0])
+                rcs_throttles[20] = abs(torque_cmd[0])
             
             # Yaw control (torque_cmd[1]): use side thrusters
             if torque_cmd[1] > 0:
-                rcs_throttles[1] = abs(torque_cmd[1])
-                rcs_throttles[5] = abs(torque_cmd[1])
-            else:
                 rcs_throttles[3] = abs(torque_cmd[1])
-                rcs_throttles[7] = abs(torque_cmd[1])
+                rcs_throttles[17] = abs(torque_cmd[1])
+            else:
+                rcs_throttles[9] = abs(torque_cmd[1])
+                rcs_throttles[23] = abs(torque_cmd[1])
             
             # Roll control (torque_cmd[2]): use opposing thrusters
             if torque_cmd[2] > 0:
-                rcs_throttles[0] = abs(torque_cmd[2])
-                rcs_throttles[2] = abs(torque_cmd[2])
-            else:
                 rcs_throttles[1] = abs(torque_cmd[2])
-                rcs_throttles[3] = abs(torque_cmd[2])
+                rcs_throttles[7] = abs(torque_cmd[2])
+            else:
+                rcs_throttles[4] = abs(torque_cmd[2])
+                rcs_throttles[10] = abs(torque_cmd[2])
             
             # Set mid-body to zero (not used in compact mode)
-            midbody_throttles = np.zeros(4)
+            midbody_throttles = np.zeros(12)
             
         else:
             # Full mode: direct thruster control
             primary_throttles = action[0:3]
-            # Map remaining actions to RCS (simplified)
-            rcs_throttles = np.zeros(8)
+            rcs_throttles = np.zeros(24)
             if len(action) > 3:
-                rcs_throttles[:min(len(action)-3, 8)] = action[3:3+min(len(action)-3, 8)]
-            midbody_throttles = np.zeros(4)
+                rcs_throttles[:min(len(action)-3, 24)] = action[3:3+min(len(action)-3, 24)]
+            midbody_throttles = np.zeros(12)
         
         # Apply thruster commands
         self.thrController.setThrusterCommands(
@@ -744,9 +750,13 @@ class LunarLanderEnv(gym.Env):
             rcsThrottles=rcs_throttles
         )
         
+        # Update controller (computes terrain forces, etc.)
+        current_time_nano = macros.sec2nano(self.current_step * self.dt)
+        self.thrController.Update(current_time_nano)
+        
         # Step simulation
-        current_time = self.current_step * self.dt
-        self.scSim.ConfigureStopTime(macros.sec2nano(current_time))
+        stop_time = macros.sec2nano(self.current_step * self.dt)
+        self.scSim.ConfigureStopTime(stop_time)
         self.scSim.ExecuteSimulation()
         
         # Get new observation
@@ -760,9 +770,13 @@ class LunarLanderEnv(gym.Env):
         reward = self._compute_reward(obs_dict, action, terminated, truncated)
         
         # Info dictionary
+        velocity = obs_dict['velocity_inertial']
+        if isinstance(velocity, np.ndarray):
+            velocity = velocity.tolist()
+        
         info = {
             'altitude': obs_dict['altitude_terrain'],
-            'velocity': obs_dict['velocity_inertial'].tolist(),
+            'velocity': velocity,
             'fuel_fraction': obs_dict['fuel_fraction'],
             'attitude_error_deg': np.degrees(obs_dict['attitude_error_angle']),
             'step': self.current_step

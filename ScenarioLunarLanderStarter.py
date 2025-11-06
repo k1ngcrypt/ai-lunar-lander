@@ -46,7 +46,7 @@ import matplotlib.pyplot as plt
 basiliskPath = os.path.join(os.path.dirname(__file__), 'basilisk', 'dist3')
 sys.path.insert(0, basiliskPath)
 
-from Basilisk.simulation import spacecraft, thrusterDynamicEffector, thrusterStateEffector, imuSensor
+from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor
 from Basilisk.simulation import fuelTank, dragDynamicEffector, exponentialAtmosphere, extForceTorque
 from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody, unitTestSupport
 from Basilisk.architecture import messaging

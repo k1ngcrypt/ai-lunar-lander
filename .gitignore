@@ -1,2 +1,6 @@
 basilisk/
 generated_terrain/
+__pycache__/
+*.pyc
+.vscode/
+*.png
