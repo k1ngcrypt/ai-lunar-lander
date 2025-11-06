@@ -147,10 +147,10 @@ python unified_training.py --mode eval --model-path ./models/best_model/best_mod
 ## 🏆 Expected Performance
 
 After full curriculum training:
-- **Mean reward**: 600+ on extreme conditions
-- **Success rate**: 70-85% successful landings
-- **Soft landing rate**: 60-75%
-- **Fuel efficiency**: 40-50% fuel remaining
+- **Mean reward**: 400-700 on extreme conditions (includes 500 base + bonuses up to 200)
+- **Success rate**: 60%+ successful landings (curriculum requires this for advancement)
+- **Landing criteria**: Altitude < 5m, vertical velocity < 3 m/s, horizontal speed < 2 m/s, attitude < 15° from upright
+- **Fuel efficiency**: Bonus up to +100 points for high fuel remaining (only awarded on successful landing)
 
 ---
 
@@ -244,15 +244,17 @@ pip install --upgrade stable-baselines3[extra] gymnasium
 ### Simulation Framework
 - **Basilisk**: High-fidelity spacecraft dynamics with 6-DOF rigid body simulation
 - **Gravity**: Lunar gravitational field (μ = 4.9028×10¹² m³/s²)
-- **Propulsion**: 3 Raptor Vacuum engines (2.5 MN thrust each)
-- **Sensors**: IMU, LIDAR (200-point scan), radar altimeter, fuel gauges
-- **Terrain**: Analytical model with procedural crater generation
+- **Propulsion**: 3 Raptor Vacuum engines (2.5 MN thrust each, 40-100% throttle)
+- **Sensors**: IMU (noisy), LIDAR (64-ray cone scan), altimeter, fuel gauges, attitude sensors
+- **Terrain**: Analytical Bekker-Wong model with procedural crater generation and realistic regolith mechanics
 
 ### Reinforcement Learning
 - **Framework**: Stable Baselines3 (PyTorch-based)
-- **Observation**: 23-dimensional state vector (position, velocity, attitude, sensors)
-- **Action**: 4-dimensional continuous (3 engine throttles + attitude control)
-- **Reward**: Composite function balancing landing success, fuel efficiency, precision
+- **Observation**: 32-dimensional state vector (position, velocity, Euler angles, fuel flow rate, time-to-impact, LIDAR azimuthal bins, IMU)
+- **Observation normalization**: VecNormalize for zero-mean, unit-variance observations (improves stability)
+- **Action**: 4-dimensional continuous (main throttle + pitch/yaw/roll torque commands)
+- **Action smoothing**: Exponential moving average filter (80% old, 20% new) for stable control
+- **Reward**: Rebalanced composite function with terminal rewards ±500, gentle shaping rewards, fuel efficiency bonus on success only
 
 ---
 

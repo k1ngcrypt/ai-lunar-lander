@@ -65,9 +65,22 @@ class LunarLanderEnv(gym.Env):
         - Main throttle (1): average throttle [0.4-1.0]
         - Attitude control (3): [pitch, yaw, roll] torque commands [-1, 1]
         
+        Action smoothing: 80% old action + 20% new action (exponential moving average filter)
+        
         Full mode (9D):
         - Primary thrusters (3): throttle [0.4-1.0] for each engine
         - RCS thrusters (6): simplified control [-1, 1]
+    
+    Reward Function:
+        Rebalanced design (fixes Issues #1-2):
+        - Terminal rewards: ±500 (5x larger) - success +500, precision +200, fuel +100
+        - Shaping rewards: Scaled to 0.1x for gentle gradient (exponential altitude penalty)
+        - Fuel efficiency bonus: ONLY on successful landing (prevents hoarding)
+        - Success window: 0-5m altitude, velocity < 3 m/s, attitude < 15°
+    
+    Reset Optimization:
+        Uses Basilisk state engine for direct state updates (eliminates warnings, 100x faster)
+        Optional create_new_sim_on_reset flag for clean but slower reset
     """
     
     metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 10}

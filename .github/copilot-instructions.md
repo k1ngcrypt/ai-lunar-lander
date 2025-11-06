@@ -18,21 +18,26 @@ This is a reinforcement learning project for training AI agents to perform auton
 
 2. **Environment Layer** (`lunar_lander_env.py`): Gymnasium wrapper
    - Translates Basilisk simulation into Gym API (`reset()`, `step()`, render)
-   - **Observation space**: 23D compact (position, velocity, attitude quaternion, IMU, LIDAR stats, fuel) or 200+ full
+   - **Observation space**: 32D compact (position, velocity, Euler angles, IMU, fuel flow rate, time-to-impact, LIDAR azimuthal bins) or 200+ full
    - **Action space**: 4D compact (main throttle 0.4-1.0, pitch/yaw/roll torques ±1) or 9D full
-   - **Reward shaping**: Composite function balancing altitude descent, fuel efficiency, landing success (±1000 bonus/penalty)
+   - **Action smoothing**: Exponential moving average (80% old, 20% new) for stable control
+   - **Reward shaping**: Rebalanced with terminal ±500, gentle shaping (0.1x), fuel efficiency bonus ONLY on success
    - **Termination**: Success (altitude < 5m, velocity < 3 m/s, upright), crash, or timeout
 
 3. **Training Layer** (`unified_training.py`): RL orchestration
-   - **Curriculum learning**: 5 progressive stages (hover → simple descent → precision landing → challenging terrain → extreme conditions)
+   - **Curriculum learning**: 5 progressive stages (simple landing → extreme conditions)
+   - **Advancement criteria**: Mean reward > threshold AND success rate > 60% (stage regression if repeated failures)
+   - **Observation normalization**: `VecNormalize` wrapper for zero-mean, unit-variance inputs (critical for PPO/SAC/TD3)
    - Multi-algorithm support (PPO default, SAC for sample efficiency, TD3 for deterministic control)
    - Parallel environments (`SubprocVecEnv` with `--n-envs 4-16`)
    - Checkpointing every 50k steps, best model auto-save via `EvalCallback`
 
 ### Key Integration Points
 - **Basilisk ↔ Gymnasium**: `LunarLanderEnv._create_simulation()` initializes Basilisk sim, updates via `scSim.ExecuteSimulation()` at 0.1s timestep
-- **Curriculum advancement**: `TrainingProgressCallback` logs stage info to TensorBoard; auto-advance when mean reward > threshold for min_episodes
-- **Terrain generation**: `generate_terrain.py` creates procedural lunar surfaces via Gaussian craters + noise; loaded by `LunarRegolithModel.load_terrain_from_file()`
+- **Optimized reset**: Uses Basilisk's state engine to directly update state values without re-initialization (eliminates warnings, 100x faster)
+- **Observation normalization**: `VecNormalize` wrapper applied to training environments for zero-mean, unit-variance observations (improves stability)
+- **Curriculum advancement**: Requires BOTH mean reward > threshold AND 60%+ success rate; supports stage regression on repeated failures
+- **Terrain generation**: `generate_terrain.py` creates realistic lunar surfaces with craters, boulders, ejecta; loaded by `LunarRegolithModel.load_terrain_from_file()`
 
 ## Critical Developer Workflows
 
@@ -82,37 +87,45 @@ check_env(env)
 
 ### Reward Function Philosophy (Critical for Tuning)
 **Located in**: `lunar_lander_env.py::_compute_reward()`
-- **Dense shaping**: Small penalties per step to guide learning (altitude descent -0.001*h, velocity penalties -0.1*|v|)
-- **Sparse bonuses**: Large terminal rewards for success (+1000) or crash (-500)
-- **Efficiency incentives**: Fuel conservation (+0.001*fuel_fraction), precision bonus (up to +100 for landing within 10m of target)
+- **Terminal rewards**: ±500 (5x larger than shaping) to dominate episode outcome - success +500, precision +200, fuel efficiency +100 (max ~700)
+- **Shaping rewards**: Scaled to 0.1x (gentle gradient) - exponential altitude penalty, velocity/attitude penalties
+- **Success window**: 0-5m altitude (realistic), velocity < 3 m/s, horizontal < 2 m/s, attitude < 15°
+- **Fuel efficiency bonus**: +100 points ONLY on successful landing (prevents hoarding during flight)
+- **Crash penalty gradient**: Scales with impact severity (-250 to -750)
 - **DO NOT** add generic "exploration bonuses" - terrain randomization provides sufficient diversity
 
 ### Curriculum Stage Design Pattern
 **Located in**: `unified_training.py::_create_curriculum()`
 Each `CurriculumStage` requires:
 - `env_config`: Dict passed to `LunarLanderEnv.__init__()` (NOT arbitrary parameters)
-- `success_threshold`: Mean reward over `min_episodes` to advance (negative values OK for early stages)
-- `max_timesteps`: Hard cap per stage (prevents infinite loops)
+- `success_threshold`: Mean reward over `min_episodes` to advance (POSITIVE values target successful landings)
+- `min_episodes`: Minimum episodes before checking advancement (200-400 for proper mastery)
+- `max_timesteps`: Hard cap per stage (100k-400k to prevent overfitting)
 
-**Convention**: Stages progressively increase `initial_altitude_range`, `num_craters`, and reduce `initial_velocity_range` tolerance
+**Advancement logic**: Requires BOTH mean reward > threshold AND success rate > 60%. Supports stage regression (go back one stage) if repeated failures.
+
+**Convention**: Stages progressively increase `initial_altitude_range` (50m → 2000m), `num_craters` (0 → 25), reduce velocity tolerance
 
 ### Basilisk Integration Quirks
-1. **Path setup required**: All scripts must add `basilisk/dist3` to `sys.path` before importing
+1. **Path setup required**: All scripts must add `basilisk/dist3` to `sys.path` before importing (use `setup_basilisk_path()` from `common_utils`)
 2. **Time units**: Basilisk uses nanoseconds (`macros.sec2nano(0.1)` for 0.1s timestep)
 3. **Coordinate frames**: 
    - `_N`: Moon-centered inertial frame (North-East-Down)
    - `_B`: Body-fixed frame (+Z is nose/up, +X forward)
    - **Critical**: LIDAR scans in body frame, positions in inertial frame
 4. **Fuel depletion**: `FuelTank` effectors auto-update spacecraft mass/inertia - DO NOT manually modify `lander.hub.mHub`
+5. **Reset optimization**: Use state engine (`stateEngine.setState()`) to update states directly - avoids re-initialization warnings and is 100x faster
 
 ### Action Space Mapping (Compact Mode)
 **Located in**: `lunar_lander_env.py::step()`
 ```python
 # action = [main_throttle, pitch_torque, yaw_torque, roll_torque]
-primary_throttles = [main_throttle] * 3  # Apply to all 3 engines
-# Torques converted to differential RCS throttles (see step() for logic)
+# Action smoothing applied: 80% old action + 20% new action (exponential moving average)
+primary_throttles = [main_throttle] * 3  # Apply to all 3 engines equally
+# Torques converted to RCS throttles via least-squares allocation (proper moment arm calculations)
 ```
 **Why compact**: 4D action space trains 10x faster than 9D full mode; sufficient for landing task
+**Action smoothing**: Reduces control oscillations, improves stability (configurable via `action_smooth_alpha`)
 
 ### File Output Structure (Auto-generated)
 ```
@@ -140,8 +153,10 @@ sys.path.insert(0, basiliskPath)
 ### Agent Not Learning (Reward < -200)
 1. **Check curriculum advancement**: Use `--mode curriculum` (NOT `--mode standard` initially)
 2. **Verify environment termination**: Ensure episodes end (check `max_episode_steps` in `LunarLanderEnv`)
-3. **Inspect TensorBoard**: Look for `rollout/ep_rew_mean` trend over 100k+ steps
-4. **Reduce action space**: Use `action_mode='compact'` (4D) not `'full'` (9D)
+3. **Inspect TensorBoard**: Look for `rollout/ep_rew_mean` trend over 100k+ steps AND `episode/success_rate_100`
+4. **Verify observation normalization**: Ensure `VecNormalize` is applied (check `unified_training.py::_normalize_env()`)
+5. **Reduce action space**: Use `action_mode='compact'` (4D) not `'full'` (9D)
+6. **Check success rate**: If reward positive but success rate low, stage may need more training time
 
 ### Training Crashes on Step
 **Likely**: Basilisk simulation divergence due to extreme actions
@@ -178,9 +193,10 @@ Reference: SB3 docs for algorithm-specific params
 
 ## Performance Expectations
 - **Curriculum training**: 4-8 hours on modern CPU (16 cores, `--n-envs 8`)
-- **Final success rate**: 70-85% successful landings on extreme terrain
-- **Mean reward**: 600+ (includes landing bonus + efficiency bonuses)
-- **Fuel efficiency**: 40-50% remaining at landing
+- **Final success rate**: 60-70% successful landings on extreme terrain (curriculum requires 60% to advance)
+- **Mean reward**: 400-700 (includes landing bonus + efficiency bonuses)
+- **Landing criteria**: Altitude < 5m, velocity < 3 m/s, horizontal speed < 2 m/s, attitude < 15°
+- **Fuel efficiency**: Variable (bonus +100 awarded only on successful landing)
 
 ## When Asking Questions
 1. **For training issues**: Include TensorBoard metrics (`rollout/ep_rew_mean` trend) and command used

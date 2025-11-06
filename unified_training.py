@@ -5,22 +5,31 @@ Unified RL Training System for Lunar Landing
 This comprehensive training script combines the best features from multiple
 training approaches:
 - Standard RL training (PPO, SAC, TD3)
-- Curriculum learning with progressive difficulty
+- Curriculum learning with progressive difficulty (5 stages)
 - Automated testing and validation
-- Advanced callbacks and monitoring
+- Advanced callbacks and monitoring (success rate tracking)
 - Multi-environment parallelization
+- Observation normalization (VecNormalize)
 - Comprehensive evaluation and visualization
 
-Features:
+Key Features:
 ✓ Multiple RL algorithms (PPO, SAC, TD3)
-✓ Curriculum learning with 5 progressive stages
+✓ Curriculum learning with stage regression support
+✓ Observation normalization for training stability
 ✓ Parallel environment training
 ✓ Automatic checkpointing and model saving
-✓ TensorBoard logging with stage annotations
+✓ TensorBoard logging with success rate metrics
 ✓ Environment validation and testing
 ✓ Model evaluation and rendering
 ✓ Quick demo mode for testing
 ✓ Resumable training from checkpoints
+
+Curriculum Improvements:
+- Stage 1 teaches LANDING (not just hovering)
+- Advancement requires BOTH mean reward AND 60% success rate
+- Stage regression enabled for repeated failures
+- Reduced max_timesteps (100k-400k) to prevent overfitting
+- Increased min_episodes (200-400) for mastery verification
 
 Usage Examples:
     # Quick test (2 minutes)
@@ -32,7 +41,7 @@ Usage Examples:
     # Standard training (1M steps)
     python unified_training.py --mode standard --timesteps 1000000
     
-    # Full curriculum training
+    # Full curriculum training (recommended)
     python unified_training.py --mode curriculum
     
     # Evaluate trained model

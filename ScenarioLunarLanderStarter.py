@@ -2,16 +2,29 @@
 ScenarioLunarLanderStarter.py
 Basilisk lunar lander scenario for Starship HLS (Human Landing System)
 
-NOTE: All Starship HLS configuration constants have been moved to starship_constants.py
-      for better code organization and reusability.
+This script demonstrates the high-fidelity Basilisk simulation used for RL training.
+All physical constants are imported from starship_constants.py module.
+
+KEY FEATURES:
+- Realistic Starship HLS configuration (1.3M kg initial mass, 3 Raptor engines)
+- Advanced sensor suite (IMU with noise, LIDAR with 64 rays, fuel gauges)
+- Lunar regolith terrain model (Bekker-Wong mechanics, procedural craters)
+- Automatic fuel depletion via thrusterStateEffector
+- Terrain contact forces via analytical model
+- Python-based thruster controller (AdvancedThrusterController)
 
 SENSORS:
 - High-precision IMU (gyro noise: 0.00001 rad/s, accel noise: 0.001 m/s²)
+- LIDAR: 64-ray cone scan (45° cone, 150m range, realistic noise/dropout)
+- AISensorSuite: Comprehensive observation space (200+ dimensions)
 
 COORDINATE SYSTEM:
 - Vehicle origin at mid-height
 - +Z is nose/up
 - +X is forward, +Y is starboard
+
+NOTE: This script runs a standalone demo. For RL training, use lunar_lander_env.py
+which wraps these components in a Gymnasium interface.
 """
 
 import sys
