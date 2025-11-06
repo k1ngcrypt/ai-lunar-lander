@@ -458,17 +458,15 @@ print(f"  Total mass flow: {perEngineMassFlow:.2f} kg/s")
 print(f"  CH4 flow: {ch4FlowPerEngine:.2f} kg/s")
 print(f"  LOX flow: {loxFlowPerEngine:.2f} kg/s")
 
-for i, pos in enumerate(enginePositions):
-    thr = thrusterStateEffector.THRConfigSimMsg()
-    thr.thrusterLocation = pos
-    thr.thrusterDirection = np.array([0., 0., 1.])  # Pointing up (+Z)
-    thr.MaxThrust = maxThrustPerEngine  # N
-    
-    # Add fuel tank connections
-    thrusterStateEffector.THRConfig_addTank(thr, ch4Tank.fuelTankOutMsg, ch4FlowPerEngine)
-    thrusterStateEffector.THRConfig_addTank(thr, loxTank.fuelTankOutMsg, loxFlowPerEngine)
-    
-    primaryEff.addThruster(thr)
+for pos in enginePositions:
+    thrConfig = thrusterStateEffector.THRSimConfig()
+    thrConfig.thrLoc_B = np.array(pos, dtype=float)
+    thrConfig.thrDir_B = np.array([0., 0., 1.])
+    thrConfig.MaxThrust = maxThrustPerEngine
+    thrConfig.steadyIsp = vacuumIsp
+
+    # add thruster with state feedback
+    primaryEff.addThruster(thrConfig, lander.scStateOutMsg)
 
 # Store indices for easy reference
 PRIMARY_START = 0
@@ -492,23 +490,18 @@ midBodyPositions = [
 ]
 
 for pos in midBodyPositions:
-    thr = thrusterStateEffector.THRConfigSimMsg()
-    thr.thrusterLocation = pos
     # Direction: radially outward for attitude control
     direction = np.array([pos[0], pos[1], 0.0])
     direction = direction / np.linalg.norm(direction)
-    thr.thrusterDirection = direction
-    thr.MaxThrust = 20000.0  # N
     
-    # Mid-body thrusters also consume fuel (smaller amounts)
-    midBodyMassFlow = 20000.0 / (vacuumIsp * g0)
-    ch4FlowMid = midBodyMassFlow / (1.0 + mixtureRatio)
-    loxFlowMid = midBodyMassFlow * mixtureRatio / (1.0 + mixtureRatio)
-    
-    thrusterStateEffector.THRConfig_addTank(thr, ch4Tank.fuelTankOutMsg, ch4FlowMid)
-    thrusterStateEffector.THRConfig_addTank(thr, loxTank.fuelTankOutMsg, loxFlowMid)
-    
-    midbodyEff.addThruster(thr)
+    thrConfig = thrusterStateEffector.THRSimConfig()
+    thrConfig.thrLoc_B = np.array(pos, dtype=float)
+    thrConfig.thrDir_B = np.array(direction, dtype=float)
+    thrConfig.MaxThrust = 20000.0
+    thrConfig.steadyIsp = vacuumIsp
+
+    # add thruster with state feedback
+    midbodyEff.addThruster(thrConfig, lander.scStateOutMsg)
 
 MIDBODY_START = PRIMARY_COUNT
 MIDBODY_COUNT = 12
@@ -545,29 +538,34 @@ rcsPositions = [
 ]
 
 for pos in rcsPositions:
-    thr = thrusterStateEffector.THRConfigSimMsg()
-    thr.thrusterLocation = pos
     # Direction: radially outward for attitude control
     direction = np.array([pos[0], pos[1], 0.0])
     direction = direction / np.linalg.norm(direction)
-    thr.thrusterDirection = direction
-    thr.MaxThrust = 2000.0  # N
     
-    # RCS thrusters consume fuel
-    rcsMassFlow = 2000.0 / (vacuumIsp * g0)
-    ch4FlowRcs = rcsMassFlow / (1.0 + mixtureRatio)
-    loxFlowRcs = rcsMassFlow * mixtureRatio / (1.0 + mixtureRatio)
-    
-    thrusterStateEffector.THRConfig_addTank(thr, ch4Tank.fuelTankOutMsg, ch4FlowRcs)
-    thrusterStateEffector.THRConfig_addTank(thr, loxTank.fuelTankOutMsg, loxFlowRcs)
-    
-    rcsEff.addThruster(thr)
+    thrConfig = thrusterStateEffector.THRSimConfig()
+    thrConfig.thrLoc_B = np.array(pos, dtype=float)
+    thrConfig.thrDir_B = np.array(direction, dtype=float)
+    thrConfig.MaxThrust = 2000.0
+    thrConfig.steadyIsp = vacuumIsp
+
+    # add thruster with state feedback
+    rcsEff.addThruster(thrConfig, lander.scStateOutMsg)
 
 RCS_START = PRIMARY_COUNT + MIDBODY_COUNT
 RCS_COUNT = 24
 
 # Total thrusters
 TOTAL_THRUSTERS = PRIMARY_COUNT + MIDBODY_COUNT + RCS_COUNT
+
+# Connect fuel tanks to thruster effectors for automatic fuel depletion
+# This enables Basilisk to automatically deplete fuel based on thrust and Isp
+ch4Tank.addThrusterSet(primaryEff)
+ch4Tank.addThrusterSet(midbodyEff)
+ch4Tank.addThrusterSet(rcsEff)
+
+loxTank.addThrusterSet(primaryEff)
+loxTank.addThrusterSet(midbodyEff)
+loxTank.addThrusterSet(rcsEff)
 
 # Print thruster configuration summary
 print(f"\nThruster Configuration (thrusterStateEffector):")
@@ -1107,6 +1105,7 @@ class AdvancedThrusterController:
         self.rcsCmdMsg = messaging.THRArrayOnTimeCmdMsg()
         
         self.ModelTag = "ThrusterController"
+        self.moduleID = 1  # Module ID for message writing
         
         # Thruster configuration
         self.primaryStart = 0
@@ -1402,11 +1401,12 @@ aiSensors.set_target_state(
 print(f"\nAI Sensor Suite Ready:")
 print(f"  Observation space size: {aiSensors.get_observation_space_size()} dimensions")
 
-# Create thruster controller
+# Create thruster controller (Python-only class, not added to task)
 thrController = AdvancedThrusterController(primaryEff, midbodyEff, rcsEff, ch4Tank, loxTank, terrain, terrainForceEff, lander)
 
-# Add controller to FSW task so it runs at 2 Hz
-scSim.AddModelToTask(fswTaskName, thrController)
+# Note: thrController is a Python helper class, not a SysModel
+# It will be called manually in the simulation loop, not as a task
+# For automated control, you would implement a proper SysModel FSW module
 
 # Connect thruster effectors to controller messages
 primaryEff.cmdsInMsg.subscribeTo(thrController.primCmdMsg)
@@ -1472,6 +1472,10 @@ sensor_read_interval = 0.5  # Read sensors every 0.5 seconds for demo
 scSim.InitializeSimulation()
 
 while current_time < simulationTime * macros.NANO2SEC:
+    # Update thruster controller (default hover test commands)
+    currentTimeNano = macros.sec2nano(current_time)
+    thrController.Update(currentTimeNano)
+    
     # Step simulation
     scSim.ConfigureStopTime(macros.sec2nano(current_time + 0.1))
     scSim.ExecuteSimulation()
