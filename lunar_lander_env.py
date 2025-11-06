@@ -665,17 +665,17 @@ class LunarLanderEnv(gym.Env):
         """
         Compute reward for current state-action pair
         
-        IMPROVED REWARD DESIGN:
-        - Terminal rewards scaled to ±100 (not ±1000) to avoid dominating shaping
-        - Shaping rewards scaled to ±10 per step for meaningful gradient
+        REBALANCED REWARD DESIGN (Fixed Issues #1-2):
+        - Terminal rewards scaled to ±500 (was ±100) to dominate episode outcome
+        - Shaping rewards scaled by 0.1x (reduced) for gentler gradient
+        - Exponential altitude penalty (worse at high altitudes)
         - Crash penalty scales with severity (worse crashes = worse penalty)
         - Fuel efficiency bonus ONLY on successful landing (avoids hoarding during flight)
-        - Stronger altitude descent incentive
         - Success window expanded to 0-5m altitude (more realistic)
         
         Target cumulative reward: 
-        - Successful landing: 100-180 (base 100 + bonuses up to 80)
-        - Failed landing: -150 to +50
+        - Successful landing: 400-700 (base 500 + bonuses up to 200)
+        - Failed landing: -600 to -100
         """
         reward = 0.0
         
@@ -690,35 +690,37 @@ class LunarLanderEnv(gym.Env):
         # Distance from target (horizontal)
         horizontal_distance = np.linalg.norm(position[:2] - self.target_position[:2])
         
-        # 1. SHAPING REWARDS (scaled to ±10 per step)
+        # 1. SHAPING REWARDS (scaled down by 10x for gentler gradient)
         
-        # Strong penalty for being above 10m (encourage descent)
+        # Exponential altitude penalty (worse at high altitudes, encourages descent)
         if altitude > 10.0:
-            altitude_reward = -0.1 * (altitude - 10.0)  # -0.1 per meter above 10m
+            # Exponential penalty: -0.001 * exp(alt/500)
+            # At 100m: -0.12, at 500m: -0.27, at 1000m: -0.74, at 2000m: -5.4
+            altitude_reward = -0.001 * np.exp(altitude / 500.0)
         else:
             # Small reward for being in landing zone
-            altitude_reward = 0.5
+            altitude_reward = 0.05
         
-        # Penalize horizontal distance from target (scaled)
-        distance_penalty = -0.05 * min(horizontal_distance, 100.0)  # Cap at 100m
+        # Penalize horizontal distance from target (scaled down)
+        distance_penalty = -0.005 * min(horizontal_distance, 100.0)  # Cap at 100m
         
-        # Penalize high velocities (scaled for impact)
-        velocity_penalty = -0.1 * (abs(vertical_vel) + horizontal_speed)
+        # Penalize high velocities (scaled down)
+        velocity_penalty = -0.01 * (abs(vertical_vel) + horizontal_speed)
         
-        # Penalize attitude error (want to stay upright)
-        attitude_penalty = -0.05 * np.degrees(attitude_error)
+        # Penalize attitude error (want to stay upright, scaled down)
+        attitude_penalty = -0.005 * np.degrees(attitude_error)
         
-        # Penalize excessive control effort (encourage smooth control)
+        # Penalize excessive control effort (encourage smooth control, scaled down)
         if self.action_mode == 'compact':
-            control_penalty = -0.01 * np.sum(np.abs(action))
+            control_penalty = -0.001 * np.sum(np.abs(action))
         else:
-            control_penalty = -0.01 * np.sum(np.abs(action))
+            control_penalty = -0.001 * np.sum(np.abs(action))
         
-        # Sum shaping rewards
+        # Sum shaping rewards (now much smaller magnitude)
         reward = (altitude_reward + distance_penalty + velocity_penalty + 
                  attitude_penalty + control_penalty)
         
-        # 2. TERMINAL REWARDS/PENALTIES (scaled to ±100)
+        # 2. TERMINAL REWARDS/PENALTIES (scaled to ±500, 5x larger)
         if terminated:
             # Expanded success window: 0-5m altitude (more realistic)
             if altitude < 5.0 and altitude > -0.5:  # Near surface
@@ -728,55 +730,55 @@ class LunarLanderEnv(gym.Env):
                     horizontal_distance < 20.0 and  # Near target (was 10.0)
                     np.degrees(attitude_error) < 15.0):  # Upright (was 10.0)
                     
-                    # SUCCESS: Base reward
-                    reward += 100.0
+                    # SUCCESS: Base reward (5x larger)
+                    reward += 500.0
                     
-                    # Bonus for precision landing (0-20 points)
-                    precision_bonus = 20.0 * max(0, 1.0 - horizontal_distance / 20.0)
+                    # Bonus for precision landing (0-100 points)
+                    precision_bonus = 100.0 * max(0, 1.0 - horizontal_distance / 20.0)
                     reward += precision_bonus
                     
-                    # Bonus for soft touchdown (0-20 points)
-                    softness_bonus = 20.0 * max(0, 1.0 - abs(vertical_vel) / 3.0)
+                    # Bonus for soft touchdown (0-50 points)
+                    softness_bonus = 50.0 * max(0, 1.0 - abs(vertical_vel) / 3.0)
                     reward += softness_bonus
                     
-                    # Bonus for upright attitude (0-10 points)
-                    attitude_bonus = 10.0 * max(0, 1.0 - np.degrees(attitude_error) / 15.0)
+                    # Bonus for upright attitude (0-50 points)
+                    attitude_bonus = 50.0 * max(0, 1.0 - np.degrees(attitude_error) / 15.0)
                     reward += attitude_bonus
                     
-                    # FUEL EFFICIENCY BONUS (0-30 points) - ONLY for successful landings
+                    # FUEL EFFICIENCY BONUS (0-100 points) - ONLY for successful landings
                     # This encourages fuel-efficient landings WITHOUT causing hoarding during flight
-                    # Scale: 0% fuel = 0 bonus, 50% fuel = +15, 100% fuel = +30 (theoretical max)
-                    fuel_efficiency_bonus = 30.0 * fuel_fraction
+                    # Scale: 0% fuel = 0 bonus, 50% fuel = +50, 100% fuel = +100
+                    fuel_efficiency_bonus = 100.0 * fuel_fraction
                     reward += fuel_efficiency_bonus
                     
                 else:
-                    # HARD LANDING: penalty scales with impact severity
+                    # HARD LANDING: penalty scales with impact severity (5x larger)
                     crash_severity = (abs(vertical_vel) / 3.0 + 
                                     horizontal_speed / 2.0 + 
                                     np.degrees(attitude_error) / 15.0)
-                    reward -= (50.0 + 20.0 * crash_severity)  # -50 to -100
+                    reward -= (250.0 + 100.0 * crash_severity)  # -250 to -500
             
             elif altitude < -0.5:
-                # CRASH: Below surface - severe penalty with gradient
+                # CRASH: Below surface - severe penalty with gradient (5x larger)
                 crash_severity = abs(vertical_vel) + horizontal_speed * 2.0
-                reward -= (50.0 + 10.0 * min(crash_severity, 10.0))  # -50 to -150
+                reward -= (250.0 + 50.0 * min(crash_severity, 10.0))  # -250 to -750
             
             else:
                 # FAILURE: Terminated at high altitude (timeout, etc.)
-                # Penalty scales with how far from landing zone
-                failure_penalty = 30.0 + 0.1 * altitude
+                # Penalty scales with how far from landing zone (5x larger)
+                failure_penalty = 150.0 + 0.5 * altitude
                 reward -= failure_penalty
         
-        # 3. DANGER ZONE WARNINGS (small penalties to guide away from crashes)
+        # 3. DANGER ZONE WARNINGS (small penalties to guide away from crashes, scaled down)
         if altitude < 50.0:
             if abs(vertical_vel) > 10.0:  # Too fast close to ground
-                reward -= 2.0
+                reward -= 0.2
             if np.degrees(attitude_error) > 30.0:  # Too tilted
-                reward -= 3.0
+                reward -= 0.3
         
-        # 4. OUT OF FUEL WARNING
+        # 4. OUT OF FUEL WARNING (scaled down)
         if fuel_fraction < 0.05:  # Less than 5% fuel
-            reward -= 5.0  # Strong penalty to encourage fuel management
+            reward -= 0.5  # Penalty to encourage fuel management
         
         return reward
     

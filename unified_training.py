@@ -56,7 +56,7 @@ from stable_baselines3.common.callbacks import (
     EvalCallback, CheckpointCallback, CallbackList, BaseCallback
 )
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from stable_baselines3.common.env_checker import check_env
 import gymnasium as gym
 
@@ -219,6 +219,28 @@ class UnifiedTrainer:
             return env
         return _init
     
+    def _normalize_env(self, env, training: bool = True):
+        """
+        Wrap environment with VecNormalize for observation/reward normalization.
+        This fixes Issue #3: Observation space inefficiencies.
+        
+        Args:
+            env: Vectorized environment (DummyVecEnv or SubprocVecEnv)
+            training: If True, normalizes observations and rewards. If False (eval), only observations.
+        
+        Returns:
+            VecNormalize wrapped environment
+        """
+        return VecNormalize(
+            env,
+            norm_obs=True,           # Normalize observations to zero mean, unit variance
+            norm_reward=training,    # Normalize rewards during training only
+            clip_obs=10.0,           # Clip normalized observations to [-10, 10]
+            clip_reward=10.0,        # Clip normalized rewards to [-10, 10]
+            gamma=0.99,              # Discount factor for reward normalization
+            epsilon=1e-8             # Small value to avoid division by zero
+        )
+    
     def _create_model(self, env, learning_rate: float = 3e-4, **kwargs):
         """Create RL model based on algorithm"""
         
@@ -311,7 +333,7 @@ class UnifiedTrainer:
                     'crater_radius_range': (0, 0)
                 }
             },
-            success_threshold=50.0,     # Basic landing (was 30.0, now accounts for fuel bonus)
+            success_threshold=-50.0,    # FIXED: Allow descent learning (negative means learning to descend)
             min_episodes=200,           # More episodes for mastery
             max_timesteps=100_000       # Reduced to prevent overfitting
         ))
@@ -621,7 +643,11 @@ class UnifiedTrainer:
         else:
             env = DummyVecEnv([self._make_env()])
         
+        # ISSUE #3 FIX: Add observation normalization
+        env = self._normalize_env(env, training=True)
+        
         eval_env = DummyVecEnv([self._make_env(rank=self.n_envs)])
+        eval_env = self._normalize_env(eval_env, training=False)  # Eval: obs normalization only
         
         # Create or load model
         if resume_path:
@@ -823,7 +849,11 @@ class UnifiedTrainer:
         else:
             env = DummyVecEnv([self._make_env(stage.env_config)])
         
+        # ISSUE #3 FIX: Add observation normalization
+        env = self._normalize_env(env, training=True)
+        
         eval_env = DummyVecEnv([self._make_env(stage.env_config, n_envs)])
+        eval_env = self._normalize_env(eval_env, training=False)  # Eval: obs normalization only
         
         # Create or update model
         if self.model is None:
