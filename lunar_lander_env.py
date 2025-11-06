@@ -14,6 +14,8 @@ Features:
 - Reward shaping for landing task
 - Episode termination conditions
 - Reuses ScenarioLunarLanderStarter simulation components
+
+NOTE: All Starship HLS configuration constants are imported from starship_constants.py
 """
 
 import numpy as np
@@ -29,6 +31,9 @@ basiliskPath = os.path.join(os.path.dirname(__file__), 'basilisk', 'dist3')
 sys.path.insert(0, basiliskPath)
 
 from Basilisk.utilities import macros
+
+# Import Starship HLS configuration constants
+import starship_constants as SC
 
 
 # Context manager to suppress Basilisk warnings
@@ -239,7 +244,7 @@ class LunarLanderEnv(gym.Env):
     def _initialize_rcs_configuration(self):
         """
         Initialize RCS thruster positions and directions for proper torque-to-throttle mapping.
-        Based on the configuration in ScenarioLunarLanderStarter.py
+        Uses configuration from starship_constants module.
         
         RCS Layout:
         - 24 thrusters total: 12 at top ring (z=22.5m), 12 at bottom ring (z=-22.5m)
@@ -247,52 +252,23 @@ class LunarLanderEnv(gym.Env):
         - All thrusters fire radially outward (tangential to the circle)
         - Each thruster produces 2,000 N
         """
-        # RCS thruster positions (from ScenarioLunarLanderStarter.py)
-        self.rcs_positions_B = np.array([
-            # Ring 1 (top, z = 22.5 m) - indices 0-11
-            [4.200, 0.000, 22.500],    # 0: R1
-            [3.637, 2.100, 22.500],    # 1: R2
-            [2.100, 3.637, 22.500],    # 2: R3
-            [0.000, 4.200, 22.500],    # 3: R4
-            [-2.100, 3.637, 22.500],   # 4: R5
-            [-3.637, 2.100, 22.500],   # 5: R6
-            [-4.200, 0.000, 22.500],   # 6: R7
-            [-3.637, -2.100, 22.500],  # 7: R8
-            [-2.100, -3.637, 22.500],  # 8: R9
-            [0.000, -4.200, 22.500],   # 9: R10
-            [2.100, -3.637, 22.500],   # 10: R11
-            [3.637, -2.100, 22.500],   # 11: R12
-            # Ring 2 (bottom, z = -22.5 m) - indices 12-23
-            [4.200, 0.000, -22.500],   # 12: R13
-            [3.637, 2.100, -22.500],   # 13: R14
-            [2.100, 3.637, -22.500],   # 14: R15
-            [0.000, 4.200, -22.500],   # 15: R16
-            [-2.100, 3.637, -22.500],  # 16: R17
-            [-3.637, 2.100, -22.500],  # 17: R18
-            [-4.200, 0.000, -22.500],  # 18: R19
-            [-3.637, -2.100, -22.500], # 19: R20
-            [-2.100, -3.637, -22.500], # 20: R21
-            [0.000, -4.200, -22.500],  # 21: R22
-            [2.100, -3.637, -22.500],  # 22: R23
-            [3.637, -2.100, -22.500]   # 23: R24
-        ], dtype=np.float32)
+        # RCS thruster positions (from starship_constants module)
+        self.rcs_positions_B = np.array(SC.RCS_THRUSTER_POSITIONS, dtype=np.float32)
         
         # RCS thrust directions (radially outward, normalized)
-        self.rcs_directions_B = np.zeros((24, 3), dtype=np.float32)
-        for i in range(24):
+        self.rcs_directions_B = np.zeros((SC.RCS_THRUSTER_COUNT, 3), dtype=np.float32)
+        for i in range(SC.RCS_THRUSTER_COUNT):
             # Direction: radially outward in x-y plane (no z component)
-            direction = np.array([self.rcs_positions_B[i, 0], 
-                                 self.rcs_positions_B[i, 1], 
-                                 0.0])
-            self.rcs_directions_B[i] = direction / np.linalg.norm(direction)
+            direction = SC.get_rcs_thruster_direction(self.rcs_positions_B[i])
+            self.rcs_directions_B[i] = direction
         
         # RCS thruster max force
-        self.rcs_max_force = 2000.0  # Newtons
+        self.rcs_max_force = SC.RCS_THRUST  # Newtons
         
         # Pre-compute moment arms for torque calculation
         # Torque = r × F, where r is position and F is force
-        self.rcs_moment_arms = np.zeros((24, 3), dtype=np.float32)
-        for i in range(24):
+        self.rcs_moment_arms = np.zeros((SC.RCS_THRUSTER_COUNT, 3), dtype=np.float32)
+        for i in range(SC.RCS_THRUSTER_COUNT):
             # Moment arm for each thruster when firing at max thrust
             force = self.rcs_directions_B[i] * self.rcs_max_force
             self.rcs_moment_arms[i] = np.cross(self.rcs_positions_B[i], force)
@@ -312,16 +288,16 @@ class LunarLanderEnv(gym.Env):
                          (Basilisk convention: +X forward, +Y right, +Z down/nose)
         
         Returns:
-            throttles: (24,) array of RCS throttle values [0, 1]
+            throttles: (RCS_THRUSTER_COUNT,) array of RCS throttle values [0, 1]
         """
         # Build the moment arm matrix A where A @ throttles ≈ torque_cmd_B
         # Each column i represents the torque contribution of thruster i at full throttle
-        A = self.rcs_moment_arms.T  # Shape: (3, 24)
+        A = self.rcs_moment_arms.T  # Shape: (3, RCS_THRUSTER_COUNT)
         
         # Solve least-squares: min ||A @ throttles - torque_cmd_B||^2
         # Subject to: 0 <= throttles <= 1
-        # Use numpy's lstsq for unconstrained solution, then clip
-        throttles, residuals, rank, s = np.linalg.lstsq(A.T, torque_cmd_B, rcond=None)
+        # np.linalg.lstsq solves A @ x = b, so we pass A (not A.T) and torque_cmd_B
+        throttles, residuals, rank, s = np.linalg.lstsq(A, torque_cmd_B, rcond=None)
         
         # Clip to valid throttle range [0, 1]
         throttles = np.clip(throttles, 0.0, 1.0)
@@ -362,14 +338,12 @@ class LunarLanderEnv(gym.Env):
         dynProcess.addTask(self.scSim.CreateNewTask(dynTaskName, simulationTimeStep))
         dynProcess.addTask(self.scSim.CreateNewTask(fswTaskName, fswTimeStep))
         
-        # Create spacecraft
+        # Create spacecraft (using constants from starship_constants module)
         self.lander = spacecraft.Spacecraft()
         self.lander.ModelTag = "Starship_HLS"
-        self.lander.hub.mHub = 105000.0
-        self.lander.hub.r_BcB_B = np.zeros(3)
-        self.lander.hub.IHubPntBc_B = np.array([[231513125.0, 0.0, 0.0],
-                                                [0.0, 231513125.0, 0.0],
-                                                [0.0, 0.0, 14276250.0]])
+        self.lander.hub.mHub = SC.HUB_MASS
+        self.lander.hub.r_BcB_B = SC.CENTER_OF_MASS_OFFSET
+        self.lander.hub.IHubPntBc_B = SC.INERTIA_TENSOR_FULL
         # Use stored initial conditions
         self.lander.hub.r_CN_NInit = self._initial_conditions['position']
         self.lander.hub.v_CN_NInit = self._initial_conditions['velocity']
@@ -378,16 +352,15 @@ class LunarLanderEnv(gym.Env):
         
         self.scSim.AddModelToTask(dynTaskName, self.lander)
         
-        # Create fuel tanks
+        # Create fuel tanks (using constants from starship_constants module)
         self.ch4Tank = fuelTank.FuelTank()
         self.ch4Tank.ModelTag = "CH4_Tank"
         ch4TankModel = fuelTank.FuelTankModelConstantVolume()
-        ch4TankModel.propMassInit = 260869.565
+        ch4TankModel.propMassInit = SC.CH4_INITIAL_MASS
         ch4TankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
-        ch4TankRadius = (3.0 * 617.005 / (4.0 * np.pi)) ** (1.0/3.0)
-        ch4TankModel.radiusTankInit = ch4TankRadius
+        ch4TankModel.radiusTankInit = SC.CH4_TANK_RADIUS
         self.ch4Tank.setTankModel(ch4TankModel)
-        self.ch4Tank.r_TB_B = [[0.0], [0.0], [-10.0]]
+        self.ch4Tank.r_TB_B = SC.CH4_TANK_POSITION
         self.ch4Tank.nameOfMassState = "ch4TankMass"
         self.lander.addStateEffector(self.ch4Tank)
         self.scSim.AddModelToTask(dynTaskName, self.ch4Tank)
@@ -395,12 +368,11 @@ class LunarLanderEnv(gym.Env):
         self.loxTank = fuelTank.FuelTank()
         self.loxTank.ModelTag = "LOX_Tank"
         loxTankModel = fuelTank.FuelTankModelConstantVolume()
-        loxTankModel.propMassInit = 939130.435
+        loxTankModel.propMassInit = SC.LOX_INITIAL_MASS
         loxTankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
-        loxTankRadius = (3.0 * 823.077 / (4.0 * np.pi)) ** (1.0/3.0)
-        loxTankModel.radiusTankInit = loxTankRadius
+        loxTankModel.radiusTankInit = SC.LOX_TANK_RADIUS
         self.loxTank.setTankModel(loxTankModel)
-        self.loxTank.r_TB_B = [[0.0], [0.0], [-5.0]]
+        self.loxTank.r_TB_B = SC.LOX_TANK_POSITION
         self.loxTank.nameOfMassState = "loxTankMass"
         self.lander.addStateEffector(self.loxTank)
         self.scSim.AddModelToTask(dynTaskName, self.loxTank)
@@ -426,7 +398,7 @@ class LunarLanderEnv(gym.Env):
                 crater_radius_range=self.terrain_config['crater_radius_range']
             )
         
-        # Create thrusters
+        # Create thrusters (using constants from starship_constants module)
         self.primaryEff = thrusterStateEffector.ThrusterStateEffector()
         self.primaryEff.ModelTag = "PrimaryThrusters"
         self.scSim.AddModelToTask(dynTaskName, self.primaryEff)
@@ -443,90 +415,32 @@ class LunarLanderEnv(gym.Env):
         self.lander.addStateEffector(self.rcsEff)
         
         # Add primary engines
-        vacuumIsp = 375.0
-        g0 = 9.80665
-        maxThrustPerEngine = 2500000.0
-        perEngineMassFlow = maxThrustPerEngine / (vacuumIsp * g0)
-        mixtureRatio = 3.6
-        ch4FlowPerEngine = perEngineMassFlow / (1.0 + mixtureRatio)
-        loxFlowPerEngine = perEngineMassFlow * mixtureRatio / (1.0 + mixtureRatio)
-        
-        enginePositions = [
-            np.array([3.500, 0.000, -24.500]),
-            np.array([-1.750, 3.031, -24.500]),
-            np.array([-1.750, -3.031, -24.500])
-        ]
-        
-        for pos in enginePositions:
+        for pos in SC.PRIMARY_ENGINE_POSITIONS:
             thr = thrusterStateEffector.THRSimConfig()
             thr.thrLoc_B = np.array(pos, dtype=float)
-            thr.thrDir_B = np.array([0., 0., 1.])
-            thr.MaxThrust = maxThrustPerEngine
-            thr.steadyIsp = vacuumIsp
+            thr.thrDir_B = SC.PRIMARY_ENGINE_DIRECTION
+            thr.MaxThrust = SC.MAX_THRUST_PER_ENGINE
+            thr.steadyIsp = SC.VACUUM_ISP
             self.primaryEff.addThruster(thr, self.lander.scStateOutMsg)
         
         # Add mid-body thrusters
-        midBodyPositions = [
-            np.array([4.000, 0.000, 0.000]),
-            np.array([3.464, 2.000, 0.000]),
-            np.array([2.000, 3.464, 0.000]),
-            np.array([0.000, 4.000, 0.000]),
-            np.array([-2.000, 3.464, 0.000]),
-            np.array([-3.464, 2.000, 0.000]),
-            np.array([-4.000, 0.000, 0.000]),
-            np.array([-3.464, -2.000, 0.000]),
-            np.array([-2.000, -3.464, 0.000]),
-            np.array([0.000, -4.000, 0.000]),
-            np.array([2.000, -3.464, 0.000]),
-            np.array([3.464, -2.000, 0.000])
-        ]
-        
-        for pos in midBodyPositions:
-            direction = np.array([pos[0], pos[1], 0.0])
-            direction = direction / np.linalg.norm(direction)
+        for pos in SC.MIDBODY_THRUSTER_POSITIONS:
+            direction = SC.get_midbody_thruster_direction(pos)
             thr = thrusterStateEffector.THRSimConfig()
             thr.thrLoc_B = np.array(pos, dtype=float)
             thr.thrDir_B = np.array(direction, dtype=float)
-            thr.MaxThrust = 20000.0
-            thr.steadyIsp = vacuumIsp
+            thr.MaxThrust = SC.MIDBODY_THRUST
+            thr.steadyIsp = SC.VACUUM_ISP
             self.midbodyEff.addThruster(thr, self.lander.scStateOutMsg)
         
         # Add RCS thrusters
-        rcsPositions = [
-            np.array([4.200, 0.000, 22.500]),
-            np.array([3.637, 2.100, 22.500]),
-            np.array([2.100, 3.637, 22.500]),
-            np.array([0.000, 4.200, 22.500]),
-            np.array([-2.100, 3.637, 22.500]),
-            np.array([-3.637, 2.100, 22.500]),
-            np.array([-4.200, 0.000, 22.500]),
-            np.array([-3.637, -2.100, 22.500]),
-            np.array([-2.100, -3.637, 22.500]),
-            np.array([0.000, -4.200, 22.500]),
-            np.array([2.100, -3.637, 22.500]),
-            np.array([3.637, -2.100, 22.500]),
-            np.array([4.200, 0.000, -22.500]),
-            np.array([3.637, 2.100, -22.500]),
-            np.array([2.100, 3.637, -22.500]),
-            np.array([0.000, 4.200, -22.500]),
-            np.array([-2.100, 3.637, -22.500]),
-            np.array([-3.637, 2.100, -22.500]),
-            np.array([-4.200, 0.000, -22.500]),
-            np.array([-3.637, -2.100, -22.500]),
-            np.array([-2.100, -3.637, -22.500]),
-            np.array([0.000, -4.200, -22.500]),
-            np.array([2.100, -3.637, -22.500]),
-            np.array([3.637, -2.100, -22.500])
-        ]
-        
-        for pos in rcsPositions:
-            direction = np.array([pos[0], pos[1], 0.0])
-            direction = direction / np.linalg.norm(direction)
+        for pos in SC.RCS_THRUSTER_POSITIONS:
+            direction = SC.get_rcs_thruster_direction(pos)
             thr = thrusterStateEffector.THRSimConfig()
             thr.thrLoc_B = np.array(pos, dtype=float)
             thr.thrDir_B = np.array(direction, dtype=float)
-            thr.MaxThrust = 2000.0
-            thr.steadyIsp = vacuumIsp
+            thr.MaxThrust = SC.RCS_THRUST
+            thr.steadyIsp = SC.VACUUM_ISP
             self.rcsEff.addThruster(thr, self.lander.scStateOutMsg)
         
         # Connect fuel tanks
@@ -1006,29 +920,24 @@ class LunarLanderEnv(gym.Env):
             stateEngine.setState(self._state_names['attitude'], attitude_mrp.copy())
             stateEngine.setState(self._state_names['omega'], omega.copy())
             
-            # Reset fuel tank masses
-            ch4InitMass = 260869.565
-            loxInitMass = 939130.435
+            # Reset fuel tank masses (using constants from starship_constants module)
+            ch4InitMass = SC.CH4_INITIAL_MASS
+            loxInitMass = SC.LOX_INITIAL_MASS
             stateEngine.setState(self._state_names['ch4_mass'], np.array([ch4InitMass]))
             stateEngine.setState(self._state_names['lox_mass'], np.array([loxInitMass]))
             
             # Reset spacecraft hub mass and inertia properties directly
-            self.lander.hub.mHub = 105000.0
-            self.lander.hub.c_B = np.zeros(3)
-            self.lander.hub.IHubPntBc_B = np.array([[231513125.0, 0.0, 0.0],
-                                                     [0.0, 231513125.0, 0.0],
-                                                     [0.0, 0.0, 14276250.0]])
+            self.lander.hub.mHub = SC.HUB_MASS
+            self.lander.hub.c_B = SC.CENTER_OF_MASS_OFFSET
+            self.lander.hub.IHubPntBc_B = SC.INERTIA_TENSOR_FULL
             
             # Reset fuel tank internal states
-            ch4TankRadius = (3.0 * 617.005 / (4.0 * np.pi)) ** (1.0/3.0)
-            loxTankRadius = (3.0 * 823.077 / (4.0 * np.pi)) ** (1.0/3.0)
-            
             self.ch4Tank.fuelMass = ch4InitMass
-            self.ch4Tank.tankRadius = ch4TankRadius
+            self.ch4Tank.tankRadius = SC.CH4_TANK_RADIUS
             self.ch4Tank.r_TcT_T = np.zeros(3)
             
             self.loxTank.fuelMass = loxInitMass
-            self.loxTank.tankRadius = loxTankRadius
+            self.loxTank.tankRadius = SC.LOX_TANK_RADIUS
             self.loxTank.r_TcT_T = np.zeros(3)
             
             # Reset thruster on-times

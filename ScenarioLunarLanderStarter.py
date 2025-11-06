@@ -2,31 +2,8 @@
 ScenarioLunarLanderStarter.py
 Basilisk lunar lander scenario for Starship HLS (Human Landing System)
 
-STARSHIP HLS CONFIGURATION:
-- Mass: 1,305,000 kg initial (dry: 85,000 kg, payload: 20,000 kg, propellant: 1,200,000 kg)
-- Dimensions: 50m height x 9m diameter
-- Inertia (full): Ixx=Iyy=231,513,125 kg·m², Izz=14,276,250 kg·m²
-- Inertia (empty): Ixx=Iyy=22,938,125 kg·m², Izz=2,126,250 kg·m²
-
-PROPELLANT SYSTEM:
-- CH4 Tank: 260,869.565 kg (density: 422.8 kg/m³, volume: 617.005 m³)
-- LOX Tank: 939,130.435 kg (density: 1,141.0 kg/m³, volume: 823.077 m³)
-- Mixture ratio (O/F): 3.6
-- Fuel depletion: Modeled with FuelTank effectors
-
-THRUSTERS:
-  * 3 Vacuum Raptor engines: 2,500,000 N each (total 7,500,000 N)
-    - Isp: 375 s (vacuum)
-    - Mass flow: 679.81 kg/s per engine @ 100% throttle
-    - Throttle range: 40%-100%
-    - Gimbal limit: ±8° (constraint enforced)
-  * 12 Mid-body thrusters: 20,000 N each
-  * 24 RCS thrusters: 2,000 N each
-
-AERODYNAMICS:
-- Frontal area: 63.617 m²
-- Drag coefficient: 0.6
-- Atmosphere: Moon exosphere (~10^-15 kg/m³, essentially vacuum)
+NOTE: All Starship HLS configuration constants have been moved to starship_constants.py
+      for better code organization and reusability.
 
 SENSORS:
 - High-precision IMU (gyro noise: 0.00001 rad/s, accel noise: 0.001 m/s²)
@@ -51,6 +28,9 @@ from Basilisk.simulation import fuelTank, dragDynamicEffector, exponentialAtmosp
 from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody, unitTestSupport
 from Basilisk.architecture import messaging
 
+# Import Starship HLS configuration constants
+import starship_constants as SC
+
 # ----------------------------------------------------------------------
 # 1. Simulation Setup
 # ----------------------------------------------------------------------
@@ -73,19 +53,13 @@ dynProcess.addTask(scSim.CreateNewTask(fswTaskName, fswTimeStep))
 # ----------------------------------------------------------------------
 # 2. Create Spacecraft - Starship HLS Configuration
 # ----------------------------------------------------------------------
-# Starship HLS parameters
-# Initial mass: dry (85,000 kg) + payload (20,000 kg) + propellant (1,200,000 kg) = 1,305,000 kg
-# We'll start with full propellant for this scenario
-# Inertia tensor (full propellant): Ixx=Iyy=231,513,125 kg·m², Izz=14,276,250 kg·m²
+# NOTE: All Starship constants imported from starship_constants module (as SC)
 
 lander = spacecraft.Spacecraft()
 lander.ModelTag = "Starship_HLS"
-lander.hub.mHub = 105000.0       # kg - Dry mass (85,000) + payload (20,000)
-lander.hub.r_BcB_B = np.zeros(3) # Center of mass at vehicle origin (mid-height)
-# NOTE: Starting with FULL propellant inertia - will change as fuel depletes
-lander.hub.IHubPntBc_B = np.array([[231513125.0, 0.0, 0.0],
-                                    [0.0, 231513125.0, 0.0],
-                                    [0.0, 0.0, 14276250.0]])  # kg·m² (full propellant inertia)
+lander.hub.mHub = SC.HUB_MASS
+lander.hub.r_BcB_B = SC.CENTER_OF_MASS_OFFSET
+lander.hub.IHubPntBc_B = SC.INERTIA_TENSOR_FULL
 lander.hub.r_CN_NInit = np.array([0., 0., 1500.0])   # 1500 m altitude above Moon surface
 lander.hub.v_CN_NInit = np.array([0., 0., -10.0])    # descending at 10 m/s
 lander.hub.sigma_BNInit = np.array([0., 0., 0.])     # no initial attitude
@@ -96,24 +70,17 @@ scSim.AddModelToTask(dynTaskName, lander)
 # ----------------------------------------------------------------------
 # 2a. Add Propellant Tanks - CH4 and LOX
 # ----------------------------------------------------------------------
-# Starship HLS propellant configuration:
-# - Total propellant: 1,200,000 kg
-# - CH4 mass: 260,869.565 kg (tank volume: 617.005 m³, density: 422.8 kg/m³)
-# - LOX mass: 939,130.435 kg (tank volume: 823.077 m³, density: 1,141.0 kg/m³)
-# - O/F ratio: 3.6
-# - Propellant cylinder height: 90% of vehicle (45 m)
+# NOTE: Tank parameters from starship_constants module
 
 # CH4 Tank (Methane)
 ch4Tank = fuelTank.FuelTank()
 ch4Tank.ModelTag = "CH4_Tank"
 ch4TankModel = fuelTank.FuelTankModelConstantVolume()
-ch4TankModel.propMassInit = 260869.565  # kg - Initial CH4 mass
-ch4TankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]  # Tank center of mass in tank frame
-# Compute tank radius from volume: V = (4/3)πr³, r = (3V/4π)^(1/3)
-ch4TankRadius = (3.0 * 617.005 / (4.0 * np.pi)) ** (1.0/3.0)
-ch4TankModel.radiusTankInit = ch4TankRadius  # m
+ch4TankModel.propMassInit = SC.CH4_INITIAL_MASS
+ch4TankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
+ch4TankModel.radiusTankInit = SC.CH4_TANK_RADIUS
 ch4Tank.setTankModel(ch4TankModel)
-ch4Tank.r_TB_B = [[0.0], [0.0], [-10.0]]  # Position below center (aft section)
+ch4Tank.r_TB_B = SC.CH4_TANK_POSITION
 ch4Tank.nameOfMassState = "ch4TankMass"
 lander.addStateEffector(ch4Tank)
 scSim.AddModelToTask(dynTaskName, ch4Tank)
@@ -122,13 +89,11 @@ scSim.AddModelToTask(dynTaskName, ch4Tank)
 loxTank = fuelTank.FuelTank()
 loxTank.ModelTag = "LOX_Tank"
 loxTankModel = fuelTank.FuelTankModelConstantVolume()
-loxTankModel.propMassInit = 939130.435  # kg - Initial LOX mass
-loxTankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]  # Tank center of mass in tank frame
-# Compute tank radius from volume
-loxTankRadius = (3.0 * 823.077 / (4.0 * np.pi)) ** (1.0/3.0)
-loxTankModel.radiusTankInit = loxTankRadius  # m
+loxTankModel.propMassInit = SC.LOX_INITIAL_MASS
+loxTankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
+loxTankModel.radiusTankInit = SC.LOX_TANK_RADIUS
 loxTank.setTankModel(loxTankModel)
-loxTank.r_TB_B = [[0.0], [0.0], [-5.0]]  # Position below center (aft section)
+loxTank.r_TB_B = SC.LOX_TANK_POSITION
 loxTank.nameOfMassState = "loxTankMass"
 lander.addStateEffector(loxTank)
 scSim.AddModelToTask(dynTaskName, loxTank)
@@ -432,130 +397,53 @@ scSim.AddModelToTask(dynTaskName, rcsEff)
 lander.addStateEffector(rcsEff)
 
 # PRIMARY AFT ENGINES (3 Vacuum Raptors with gimbal)
-# Total thrust: 3 x 2,500,000 N = 7,500,000 N
-# Vacuum Isp: 375 s
-# Per-engine mass flow: 679.81 kg/s (Fuel: 147.78 kg/s CH4, Ox: 532.03 kg/s LOX)
-# Gimbal range: ±8°
-enginePositions = [
-    np.array([3.500, 0.000, -24.500]),      # Engine A1
-    np.array([-1.750, 3.031, -24.500]),     # Engine A2
-    np.array([-1.750, -3.031, -24.500])     # Engine A3
-]
-
-# Vacuum Isp = 375s, g0 = 9.80665 m/s²
-vacuumIsp = 375.0
-g0 = 9.80665
-maxThrustPerEngine = 2500000.0  # N
-perEngineMassFlow = maxThrustPerEngine / (vacuumIsp * g0)  # kg/s total
-mixtureRatio = 3.6  # O/F ratio
-
-# Calculate fuel flow rates per engine
-ch4FlowPerEngine = perEngineMassFlow / (1.0 + mixtureRatio)  # kg/s CH4
-loxFlowPerEngine = perEngineMassFlow * mixtureRatio / (1.0 + mixtureRatio)  # kg/s LOX
+# NOTE: All thruster configuration from starship_constants module
 
 print(f"\nPrimary Engine Fuel Consumption (per engine @ 100%):")
-print(f"  Total mass flow: {perEngineMassFlow:.2f} kg/s")
-print(f"  CH4 flow: {ch4FlowPerEngine:.2f} kg/s")
-print(f"  LOX flow: {loxFlowPerEngine:.2f} kg/s")
+print(f"  Total mass flow: {SC.PER_ENGINE_MASS_FLOW:.2f} kg/s")
+print(f"  CH4 flow: {SC.CH4_FLOW_PER_ENGINE:.2f} kg/s")
+print(f"  LOX flow: {SC.LOX_FLOW_PER_ENGINE:.2f} kg/s")
 
-for pos in enginePositions:
+for pos in SC.PRIMARY_ENGINE_POSITIONS:
     thrConfig = thrusterStateEffector.THRSimConfig()
     thrConfig.thrLoc_B = np.array(pos, dtype=float)
-    thrConfig.thrDir_B = np.array([0., 0., 1.])
-    thrConfig.MaxThrust = maxThrustPerEngine
-    thrConfig.steadyIsp = vacuumIsp
-
-    # add thruster with state feedback
+    thrConfig.thrDir_B = SC.PRIMARY_ENGINE_DIRECTION
+    thrConfig.MaxThrust = SC.MAX_THRUST_PER_ENGINE
+    thrConfig.steadyIsp = SC.VACUUM_ISP
     primaryEff.addThruster(thrConfig, lander.scStateOutMsg)
 
 # Store indices for easy reference
-PRIMARY_START = 0
-PRIMARY_COUNT = 3
+PRIMARY_START = SC.PRIMARY_ENGINE_START_INDEX
+PRIMARY_COUNT = SC.PRIMARY_ENGINE_COUNT
 
 # MID-BODY THRUSTERS (12 thrusters for attitude control)
-# 20,000 N each, positioned at radius 4.0 m, z = 0.0 m
-midBodyPositions = [
-    np.array([4.000, 0.000, 0.000]),    # M1
-    np.array([3.464, 2.000, 0.000]),    # M2
-    np.array([2.000, 3.464, 0.000]),    # M3
-    np.array([0.000, 4.000, 0.000]),    # M4
-    np.array([-2.000, 3.464, 0.000]),   # M5
-    np.array([-3.464, 2.000, 0.000]),   # M6
-    np.array([-4.000, 0.000, 0.000]),   # M7
-    np.array([-3.464, -2.000, 0.000]),  # M8
-    np.array([-2.000, -3.464, 0.000]),  # M9
-    np.array([0.000, -4.000, 0.000]),   # M10
-    np.array([2.000, -3.464, 0.000]),   # M11
-    np.array([3.464, -2.000, 0.000])    # M12
-]
-
-for pos in midBodyPositions:
-    # Direction: radially outward for attitude control
-    direction = np.array([pos[0], pos[1], 0.0])
-    direction = direction / np.linalg.norm(direction)
-    
+for pos in SC.MIDBODY_THRUSTER_POSITIONS:
+    direction = SC.get_midbody_thruster_direction(pos)
     thrConfig = thrusterStateEffector.THRSimConfig()
     thrConfig.thrLoc_B = np.array(pos, dtype=float)
     thrConfig.thrDir_B = np.array(direction, dtype=float)
-    thrConfig.MaxThrust = 20000.0
-    thrConfig.steadyIsp = vacuumIsp
-
-    # add thruster with state feedback
+    thrConfig.MaxThrust = SC.MIDBODY_THRUST
+    thrConfig.steadyIsp = SC.VACUUM_ISP
     midbodyEff.addThruster(thrConfig, lander.scStateOutMsg)
 
-MIDBODY_START = PRIMARY_COUNT
-MIDBODY_COUNT = 12
+MIDBODY_START = SC.MIDBODY_THRUSTER_START_INDEX
+MIDBODY_COUNT = SC.MIDBODY_THRUSTER_COUNT
 
 # RCS THRUSTERS (24 thrusters: 12 at top ring, 12 at bottom ring)
-# 2,000 N each
-rcsPositions = [
-    # Ring 1 (top, z = 22.5 m)
-    np.array([4.200, 0.000, 22.500]),    # R1
-    np.array([3.637, 2.100, 22.500]),    # R2
-    np.array([2.100, 3.637, 22.500]),    # R3
-    np.array([0.000, 4.200, 22.500]),    # R4
-    np.array([-2.100, 3.637, 22.500]),   # R5
-    np.array([-3.637, 2.100, 22.500]),   # R6
-    np.array([-4.200, 0.000, 22.500]),   # R7
-    np.array([-3.637, -2.100, 22.500]),  # R8
-    np.array([-2.100, -3.637, 22.500]),  # R9
-    np.array([0.000, -4.200, 22.500]),   # R10
-    np.array([2.100, -3.637, 22.500]),   # R11
-    np.array([3.637, -2.100, 22.500]),   # R12
-    # Ring 2 (bottom, z = -22.5 m)
-    np.array([4.200, 0.000, -22.500]),   # R13
-    np.array([3.637, 2.100, -22.500]),   # R14
-    np.array([2.100, 3.637, -22.500]),   # R15
-    np.array([0.000, 4.200, -22.500]),   # R16
-    np.array([-2.100, 3.637, -22.500]),  # R17
-    np.array([-3.637, 2.100, -22.500]),  # R18
-    np.array([-4.200, 0.000, -22.500]),  # R19
-    np.array([-3.637, -2.100, -22.500]), # R20
-    np.array([-2.100, -3.637, -22.500]), # R21
-    np.array([0.000, -4.200, -22.500]),  # R22
-    np.array([2.100, -3.637, -22.500]),  # R23
-    np.array([3.637, -2.100, -22.500])   # R24
-]
-
-for pos in rcsPositions:
-    # Direction: radially outward for attitude control
-    direction = np.array([pos[0], pos[1], 0.0])
-    direction = direction / np.linalg.norm(direction)
-    
+for pos in SC.RCS_THRUSTER_POSITIONS:
+    direction = SC.get_rcs_thruster_direction(pos)
     thrConfig = thrusterStateEffector.THRSimConfig()
     thrConfig.thrLoc_B = np.array(pos, dtype=float)
     thrConfig.thrDir_B = np.array(direction, dtype=float)
-    thrConfig.MaxThrust = 2000.0
-    thrConfig.steadyIsp = vacuumIsp
-
-    # add thruster with state feedback
+    thrConfig.MaxThrust = SC.RCS_THRUST
+    thrConfig.steadyIsp = SC.VACUUM_ISP
     rcsEff.addThruster(thrConfig, lander.scStateOutMsg)
 
-RCS_START = PRIMARY_COUNT + MIDBODY_COUNT
-RCS_COUNT = 24
+RCS_START = SC.RCS_THRUSTER_START_INDEX
+RCS_COUNT = SC.RCS_THRUSTER_COUNT
 
 # Total thrusters
-TOTAL_THRUSTERS = PRIMARY_COUNT + MIDBODY_COUNT + RCS_COUNT
+TOTAL_THRUSTERS = SC.TOTAL_THRUSTER_COUNT
 
 # Connect fuel tanks to thruster effectors for automatic fuel depletion
 # This enables Basilisk to automatically deplete fuel based on thrust and Isp
@@ -808,7 +696,7 @@ class AISensorSuite:
         self.target_quaternion = np.array([0.0, 0.0, 0.0, 1.0])  # Target attitude (upright)
         
         # Constants
-        self.dry_mass = 105000.0  # kg (dry mass + payload)
+        self.dry_mass = SC.HUB_MASS  # kg (dry mass + payload)
         self.g_moon = 1.62  # m/s² (lunar surface gravity)
         
         print(f"\nAI Sensor Suite Initialized:")
@@ -961,9 +849,9 @@ class AISensorSuite:
         total_mass = self.dry_mass + total_fuel_mass
         
         # Fuel fractions (0-1)
-        ch4_fraction = ch4_mass / 260869.565  # Initial CH4 mass
-        lox_fraction = lox_mass / 939130.435  # Initial LOX mass
-        fuel_fraction = total_fuel_mass / 1200000.0  # Initial total propellant
+        ch4_fraction = ch4_mass / SC.CH4_INITIAL_MASS
+        lox_fraction = lox_mass / SC.LOX_INITIAL_MASS
+        fuel_fraction = total_fuel_mass / SC.TOTAL_PROPELLANT_MASS
         
         # --- LIDAR POINT CLOUD ---
         point_cloud_B, ranges, intensities = self.lidar.scan(position_N, BN_dcm, velocity_N)
@@ -1517,7 +1405,7 @@ loxMass = loxTankLog.fuelMass
 totalPropMass = ch4Mass + loxMass
 
 # Calculate total vehicle mass (dry + propellant)
-dryMass = 105000.0  # kg
+dryMass = SC.HUB_MASS  # kg
 totalMass = dryMass + totalPropMass
 
 # Compute terrain-relative altitude for all timesteps
