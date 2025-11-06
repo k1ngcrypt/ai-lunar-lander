@@ -19,9 +19,11 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 
+# Import common utilities
+from common_utils import setup_basilisk_path, mrp_to_dcm, mrp_to_quaternion, quaternion_multiply, quaternion_conjugate
+
 # Add Basilisk to path (built in dist3 directory)
-basiliskPath = os.path.join(os.path.dirname(__file__), 'basilisk', 'dist3')
-sys.path.insert(0, basiliskPath)
+setup_basilisk_path()
 
 from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor
 from Basilisk.simulation import fuelTank, dragDynamicEffector, exponentialAtmosphere, extForceTorque
@@ -967,65 +969,15 @@ class AISensorSuite:
         if quaternion is not None:
             self.target_quaternion = np.array(quaternion)
     
-    def mrp_to_quaternion(self, sigma):
-        """Convert Modified Rodriguez Parameters (MRP) to quaternion"""
-        s1, s2, s3 = sigma
-        s_squared = s1*s1 + s2*s2 + s3*s3
-        
-        # MRP to quaternion formula
-        denom = 1.0 + s_squared
-        q = np.array([
-            2.0 * s1 / denom,
-            2.0 * s2 / denom,
-            2.0 * s3 / denom,
-            (1.0 - s_squared) / denom
-        ])
-        return q
-    
-    def quaternion_multiply(self, q1, q2):
-        """Multiply two quaternions"""
-        x1, y1, z1, w1 = q1
-        x2, y2, z2, w2 = q2
-        return np.array([
-            w1*x2 + x1*w2 + y1*z2 - z1*y2,
-            w1*y2 - x1*z2 + y1*w2 + z1*x2,
-            w1*z2 + x1*y2 - y1*x2 + z1*w2,
-            w1*w2 - x1*x2 - y1*y2 - z1*z2
-        ])
-    
-    def quaternion_conjugate(self, q):
-        """Compute quaternion conjugate (inverse for unit quaternions)"""
-        return np.array([-q[0], -q[1], -q[2], q[3]])
-    
     def quaternion_error(self, q_current, q_target):
         """
         Compute attitude error quaternion: q_error = q_target^-1 * q_current
         Returns quaternion representing rotation from current to target
+        
+        Note: Delegates to common_utils for implementation
         """
-        q_target_inv = self.quaternion_conjugate(q_target)
-        q_error = self.quaternion_multiply(q_target_inv, q_current)
-        return q_error
-    
-    def mrp_to_dcm(self, sigma):
-        """Convert Modified Rodriguez Parameters to Direction Cosine Matrix"""
-        s1, s2, s3 = sigma
-        s_squared = s1*s1 + s2*s2 + s3*s3
-        
-        C = np.eye(3)
-        C += (8.0 / (1.0 + s_squared)**2) * (
-            np.array([[0, -s3, s2],
-                     [s3, 0, -s1],
-                     [-s2, s1, 0]]) @ 
-            np.array([[0, -s3, s2],
-                     [s3, 0, -s1],
-                     [-s2, s1, 0]])
-        )
-        C += (4.0 * (1.0 - s_squared) / (1.0 + s_squared)**2) * \
-            np.array([[0, -s3, s2],
-                     [s3, 0, -s1],
-                     [-s2, s1, 0]])
-        
-        return C
+        from common_utils import quaternion_error as compute_quaternion_error
+        return compute_quaternion_error(q_current, q_target)
     
     def update(self):
         """
@@ -1062,8 +1014,8 @@ class AISensorSuite:
             gyro_history_padded.insert(0, np.zeros(3))
         
         # Convert attitude to DCM and quaternion
-        BN_dcm = self.mrp_to_dcm(sigma_BN)
-        quaternion = self.mrp_to_quaternion(sigma_BN)
+        BN_dcm = mrp_to_dcm(sigma_BN)
+        quaternion = mrp_to_quaternion(sigma_BN)
         
         # --- TERRAIN-RELATIVE MEASUREMENTS ---
         # Altitude above local terrain (not just inertial Z)
@@ -1391,7 +1343,7 @@ class AdvancedThrusterController:
         
         # Convert MRP to DCM (Direction Cosine Matrix)
         # DCM transforms from body to inertial: r_N = [BN] * r_B
-        BN = self.mrp_to_dcm(sigma_BN)
+        BN = mrp_to_dcm(sigma_BN)
         
         # Total contact force and torque
         total_force_N = np.zeros(3)
@@ -1426,28 +1378,6 @@ class AdvancedThrusterController:
         forceMsg.forceRequestInertial = total_force_N
         forceMsg.torqueRequestBody = total_torque_B
         self.terrainForceMsg.write(forceMsg, self.moduleID, currentTime)
-        
-    def mrp_to_dcm(self, sigma):
-        """Convert Modified Rodriguez Parameters to Direction Cosine Matrix"""
-        s1, s2, s3 = sigma
-        s_squared = s1*s1 + s2*s2 + s3*s3
-        
-        # Compute DCM
-        C = np.eye(3)
-        C += (8.0 / (1.0 + s_squared)**2) * (
-            np.array([[0, -s3, s2],
-                     [s3, 0, -s1],
-                     [-s2, s1, 0]]) @ 
-            np.array([[0, -s3, s2],
-                     [s3, 0, -s1],
-                     [-s2, s1, 0]])
-        )
-        C += (4.0 * (1.0 - s_squared) / (1.0 + s_squared)**2) * \
-            np.array([[0, -s3, s2],
-                     [s3, 0, -s1],
-                     [-s2, s1, 0]])
-        
-        return C
         
     def Update(self, currentTime):
         """

@@ -17,6 +17,7 @@ Usage:
 import numpy as np
 import os
 import argparse
+from common_utils import fade, lerp
 
 
 def perlin_noise_2d(shape, scale=10.0, octaves=6, persistence=0.5, lacunarity=2.0, seed=None):
@@ -36,14 +37,6 @@ def perlin_noise_2d(shape, scale=10.0, octaves=6, persistence=0.5, lacunarity=2.
     """
     if seed is not None:
         np.random.seed(seed)
-    
-    def fade(t):
-        """Smoothstep interpolation"""
-        return t * t * t * (t * (t * 6 - 15) + 10)
-    
-    def lerp(a, b, t):
-        """Linear interpolation"""
-        return a + t * (b - a)
     
     def gradient(h, x, y):
         """Generate gradient vectors"""

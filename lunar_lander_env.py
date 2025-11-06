@@ -23,40 +23,17 @@ import gymnasium as gym
 from gymnasium import spaces
 import sys
 import os
-import warnings
-import contextlib
+
+# Import common utilities
+from common_utils import setup_basilisk_path, suppress_basilisk_warnings, quaternion_to_euler
 
 # Add Basilisk to path
-basiliskPath = os.path.join(os.path.dirname(__file__), 'basilisk', 'dist3')
-sys.path.insert(0, basiliskPath)
+setup_basilisk_path()
 
 from Basilisk.utilities import macros
 
 # Import Starship HLS configuration constants
 import starship_constants as SC
-
-
-# Context manager to suppress Basilisk warnings
-@contextlib.contextmanager
-def suppress_basilisk_warnings():
-    """
-    Temporarily redirect stderr to suppress Basilisk warnings.
-    
-    Basilisk prints warnings directly to stderr (not through Python's warning system),
-    so we need to temporarily redirect stderr to suppress them during initialization.
-    
-    These warnings are harmless - they occur when Basilisk's state engine registers
-    properties during initialization, which is expected behavior.
-    """
-    import io
-    import sys
-    
-    old_stderr = sys.stderr
-    sys.stderr = io.StringIO()
-    try:
-        yield
-    finally:
-        sys.stderr = old_stderr
 
 
 class LunarLanderEnv(gym.Env):
@@ -556,7 +533,7 @@ class LunarLanderEnv(gym.Env):
             # Convert quaternion to Euler angles (roll, pitch, yaw) in radians
             # This eliminates quaternion double-cover ambiguity
             quat = obs_dict['attitude_quaternion']
-            euler_angles = self._quaternion_to_euler(quat)
+            euler_angles = quaternion_to_euler(quat)
             
             # Process LIDAR into azimuthal bins (8 directions: N, NE, E, SE, S, SW, W, NW)
             lidar_ranges = obs_dict['lidar_ranges']
@@ -590,32 +567,6 @@ class LunarLanderEnv(gym.Env):
             obs = self.aiSensors.get_flattened_observation().astype(np.float32)
         
         return obs
-    
-    def _quaternion_to_euler(self, quat):
-        """
-        Convert quaternion [x, y, z, w] to Euler angles [roll, pitch, yaw] in radians
-        Using ZYX convention (yaw-pitch-roll)
-        """
-        x, y, z, w = quat
-        
-        # Roll (x-axis rotation)
-        sinr_cosp = 2.0 * (w * x + y * z)
-        cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-        roll = np.arctan2(sinr_cosp, cosr_cosp)
-        
-        # Pitch (y-axis rotation)
-        sinp = 2.0 * (w * y - z * x)
-        if abs(sinp) >= 1:
-            pitch = np.sign(sinp) * np.pi / 2  # Use 90 degrees if out of range
-        else:
-            pitch = np.arcsin(sinp)
-        
-        # Yaw (z-axis rotation)
-        siny_cosp = 2.0 * (w * z + x * y)
-        cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-        yaw = np.arctan2(siny_cosp, cosy_cosp)
-        
-        return np.array([roll, pitch, yaw], dtype=np.float32)
     
     def _process_lidar_azimuthal(self, point_cloud, ranges):
         """
