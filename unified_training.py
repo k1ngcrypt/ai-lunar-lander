@@ -129,8 +129,8 @@ class TrainingProgressCallback(BaseCallback):
                         self.episode_rewards.append(ep_reward)
                         self.episode_lengths.append(ep_length)
                         
-                        # Determine success (reward > 50 indicates successful landing)
-                        success = ep_reward > 50.0
+                        # Determine success (reward > 400 indicates successful landing with new reward scale)
+                        success = ep_reward > 400.0
                         self.episode_successes.append(success)
                         
                         # Log to TensorBoard
@@ -153,6 +153,52 @@ class TrainingProgressCallback(BaseCallback):
                 return 0.0
             return np.mean(self.episode_successes)
         return np.mean(self.episode_successes[-num_episodes:])
+
+
+class RewardStatisticsCallback(BaseCallback):
+    """Callback to track and log reward component statistics for analysis"""
+    
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self.reward_components = {}  # Dict of component_name -> list of values
+        self.episodes_logged = 0
+        
+    def _on_step(self) -> bool:
+        # Track reward components from episode info
+        if self.locals.get('dones', [False])[0]:
+            if 'infos' in self.locals:
+                for info in self.locals['infos']:
+                    if 'reward_components' in info:
+                        components = info['reward_components']
+                        
+                        # Accumulate each component
+                        for comp_name, comp_value in components.items():
+                            if comp_name not in self.reward_components:
+                                self.reward_components[comp_name] = []
+                            self.reward_components[comp_name].append(comp_value)
+                        
+                        self.episodes_logged += 1
+                        
+                        # Log statistics every 100 episodes
+                        if self.episodes_logged % 100 == 0:
+                            self._log_component_statistics()
+        
+        return True
+    
+    def _log_component_statistics(self):
+        """Log mean reward component values to TensorBoard"""
+        if hasattr(self.logger, 'record'):
+            for comp_name, values in self.reward_components.items():
+                if len(values) > 0:
+                    # Log mean of last 100 episodes
+                    recent_values = values[-100:]
+                    mean_value = np.mean(recent_values)
+                    self.logger.record(f"reward_components/{comp_name}", mean_value)
+            
+            # Clear old data to avoid memory bloat
+            for comp_name in self.reward_components:
+                if len(self.reward_components[comp_name]) > 200:
+                    self.reward_components[comp_name] = self.reward_components[comp_name][-200:]
 
 
 # ============================================================================
@@ -314,13 +360,18 @@ class UnifiedTrainer:
     
     def _create_curriculum(self) -> List[CurriculumStage]:
         """
-        Define curriculum stages with IMPROVED design:
-        - All success thresholds are POSITIVE (representing actual successful landings)
+        Define curriculum stages with OPTIMIZED reward scale:
+        - All success thresholds scaled to new reward system (terminal ±1000)
         - Stage 1 teaches LANDING, not just hovering
         - Reduced max_timesteps to prevent overfitting (100k-400k per stage)
         - Progressive difficulty with smooth transitions
         - Min_episodes increased for better mastery verification
-        - Thresholds account for fuel efficiency bonus (successful landing = 100-180 reward)
+        
+        New Reward Scale:
+        - Perfect landing: 800-1200 (terminal 1000 + bonuses 200-400)
+        - Good landing: 600-800
+        - Poor landing: 200-400
+        - Crash: -400 to -800
         """
         stages = []
         
@@ -342,7 +393,7 @@ class UnifiedTrainer:
                     'crater_radius_range': (0, 0)
                 }
             },
-            success_threshold=-50.0,    # FIXED: Allow descent learning (negative means learning to descend)
+            success_threshold=400.0,    # Basic landing: 400+ (includes terminal 1000, minus shaping penalties)
             min_episodes=200,           # More episodes for mastery
             max_timesteps=100_000       # Reduced to prevent overfitting
         ))
@@ -365,7 +416,7 @@ class UnifiedTrainer:
                     'crater_radius_range': (30, 50)
                 }
             },
-            success_threshold=60.0,     # Better landing required
+            success_threshold=600.0,     # Good landing required (includes some bonuses)
             min_episodes=200,
             max_timesteps=150_000
         ))
@@ -388,7 +439,7 @@ class UnifiedTrainer:
                     'crater_radius_range': (20, 60)
                 }
             },
-            success_threshold=70.0,     # Fuel efficiency starts mattering
+            success_threshold=700.0,     # Fuel efficiency starts mattering
             min_episodes=250,
             max_timesteps=200_000
         ))
@@ -411,7 +462,7 @@ class UnifiedTrainer:
                     'crater_radius_range': (15, 60)
                 }
             },
-            success_threshold=80.0,     # High-quality landings
+            success_threshold=800.0,     # High-quality landings expected
             min_episodes=300,
             max_timesteps=300_000
         ))
@@ -434,7 +485,7 @@ class UnifiedTrainer:
                     'crater_radius_range': (10, 80)
                 }
             },
-            success_threshold=90.0,     # Near-optimal performance expected
+            success_threshold=900.0,     # Near-optimal performance: high precision + fuel efficiency
             min_episodes=400,
             max_timesteps=400_000
         ))
@@ -696,8 +747,9 @@ class UnifiedTrainer:
         )
         
         progress_callback = TrainingProgressCallback("standard_training", verbose=1)
+        reward_stats_callback = RewardStatisticsCallback(verbose=1)
         
-        callback = CallbackList([checkpoint_callback, eval_callback, progress_callback])
+        callback = CallbackList([checkpoint_callback, eval_callback, progress_callback, reward_stats_callback])
         
         # Train
         print("\n" + "="*80)
@@ -879,7 +931,8 @@ class UnifiedTrainer:
             save_freq=50_000 if not demo else 5_000,
             save_path=os.path.join(self.save_dir, f'{stage.name}_checkpoints'),
             name_prefix=f'{self.algorithm}_{stage.name}',
-            save_replay_buffer=False
+            save_replay_buffer=False,
+            save_vecnormalize=True  # CRITICAL: Save normalization statistics
         )
         
         eval_callback = EvalCallback(
@@ -893,8 +946,9 @@ class UnifiedTrainer:
         )
         
         progress_callback = TrainingProgressCallback(stage.name, verbose=1)
+        reward_stats_callback = RewardStatisticsCallback(verbose=1)
         
-        callback = CallbackList([checkpoint_callback, eval_callback, progress_callback])
+        callback = CallbackList([checkpoint_callback, eval_callback, progress_callback, reward_stats_callback])
         
         # Train
         print(f"\nTraining for up to {stage.max_timesteps:,} timesteps...")

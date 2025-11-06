@@ -147,16 +147,139 @@ python unified_training.py --mode eval --model-path ./models/best_model/best_mod
 ## 🏆 Expected Performance
 
 After full curriculum training:
-- **Mean reward**: 400-700 on extreme conditions (includes 500 base + bonuses up to 200)
+- **Mean reward**: 800-1200 on extreme conditions (terminal 1000 + bonuses up to 400)
 - **Success rate**: 60%+ successful landings (curriculum requires this for advancement)
 - **Landing criteria**: Altitude < 5m, vertical velocity < 3 m/s, horizontal speed < 2 m/s, attitude < 15° from upright
-- **Fuel efficiency**: Bonus up to +100 points for high fuel remaining (only awarded on successful landing)
+- **Fuel efficiency**: Bonus up to +150 points for high fuel remaining (only awarded on successful landing)
+
+---
+
+## 🎁 Reward System Design
+
+The reward system uses a **comprehensive multi-component architecture** designed to guide the agent from initial random actions to optimal landing performance.
+
+### Reward Architecture
+
+```
+Total Reward = Terminal Rewards + Progress Tracking + Safety/Efficiency + Control Quality
+               (±1000 scale)    (0-5 scale)        (±2 scale)          (±1 scale)
+```
+
+### 1. Terminal Rewards (±1000) - Dominant Episode Outcome
+
+**Success Landing (1000-1600 points):**
+- Base success: **+1000** (largest single component)
+- Precision bonus: **+0 to +200** (scales with distance from target)
+- Softness bonus: **+0 to +100** (scales with touchdown velocity)
+- Attitude bonus: **+0 to +100** (scales with upright orientation)
+- Fuel efficiency: **+0 to +150** (quadratic curve, ONLY on success)
+- Control smoothness: **+0 to +50** (rewards stable final approach)
+
+**Hard Landing (-300 to -450 points):**
+- Base penalty scaled by violation severity (velocity, position, attitude errors)
+
+**Crash (-400 to -800 points):**
+- Penalty scales with impact energy (velocity squared)
+
+**High Altitude Failure (-200 to -400 points):**
+- Penalty scales with altitude (higher failure = worse penalty)
+
+### 2. Progress Tracking Rewards (0-5 per step) - Continuous Guidance
+
+**Descent Profile (0-1):** Encourages proper descent rate proportional to altitude (-2 to -10 m/s)
+
+**Approach Angle (0-0.5):** Rewards vertical descent near ground (low horizontal/vertical velocity ratio)
+
+**Proximity to Target (0-1):** Progressive reward for getting closer to landing site (active < 200m altitude)
+
+**Attitude Stability (0-0.5):** Rewards upright orientation near ground (< 100m altitude)
+
+**Final Approach Quality (0-2):** High reward in last 50m for being slow, upright, and on-target
+
+### 3. Safety & Efficiency Penalties (±2 per step)
+
+**Danger Zone Warnings (altitude < 50m):**
+- Speed danger: **-0 to -1** (excessive vertical velocity)
+- Tilt danger: **-0 to -0.5** (tilted orientation)
+- Lateral danger: **-0 to -0.5** (high horizontal velocity)
+
+**Fuel Management:** **-0 to -1** (progressive warning as fuel depletes below 10%)
+
+**High Altitude Loitering:** **-0.5** (discourages hovering above 500m)
+
+### 4. Control Quality Penalties (±1 per step)
+
+**Control Effort:** **-0.001 × effort** (encourages efficient control)
+
+**Control Jitter:** **-0.1 × change** (penalizes rapid control changes)
+
+**Spin Rate:** **-0 to -0.5** (discourages uncontrolled rotation)
+
+### Reward Design Philosophy
+
+1. **Terminal rewards dominate** (10x larger than shaping) - clearly signals success/failure
+2. **Progressive difficulty** - rewards increase as agent approaches landing
+3. **Fuel efficiency rewarded ONLY on success** - prevents hoarding during flight
+4. **Multi-dimensional success criteria** - velocity, position, attitude, fuel all matter
+5. **Penalties scale with severity** - worse violations get worse penalties
+6. **Action smoothing** - exponential moving average (80% old, 20% new) for stable control
+
+### Expected Cumulative Rewards
+
+| Outcome | Cumulative Reward | Description |
+|---------|-------------------|-------------|
+| **Perfect Landing** | 1200-1600 | All bonuses achieved (precision, fuel, smoothness) |
+| **Good Landing** | 900-1200 | Most bonuses achieved |
+| **Basic Landing** | 600-900 | Minimal bonuses, but successful |
+| **Poor Landing** | 400-600 | Barely meets success criteria |
+| **Hard Landing** | -300 to -450 | Crashes but in landing zone |
+| **Crash** | -400 to -800 | Impact below surface |
+| **Timeout/Abort** | -200 to -400 | Failure at high altitude |
+
+### Monitoring Reward Components
+
+The system tracks **individual reward components** for debugging and analysis:
+
+```bash
+# Launch TensorBoard to view reward component breakdown
+tensorboard --logdir=./logs
+
+# Navigate to "reward_components" section to see:
+# - terminal_success, precision_bonus, fuel_efficiency, etc.
+# - descent_profile, approach_angle, proximity, etc.
+# - danger penalties, control quality metrics
+```
+
+Each episode's info dict includes `reward_components` with detailed breakdown of all reward sources.
+
+### Tuning Guidelines
+
+**If agent not landing:**
+- Increase `success_threshold` in curriculum stages
+- Increase `min_episodes` for better mastery
+- Check TensorBoard for `episode/success_rate_100` metric
+
+**If agent too cautious (hovers):**
+- Increase loitering penalty
+- Reduce fuel efficiency bonus coefficient
+- Add progressive time penalty
+
+**If agent crashes frequently:**
+- Increase danger zone penalties
+- Reduce initial velocity range in curriculum
+- Add more stages to curriculum
+
+**If agent uses too much fuel:**
+- Increase fuel efficiency bonus coefficient
+- Add fuel consumption penalty during flight
+- Reward descent profile adherence more
 
 ---
 
 ## 📚 Documentation
 
 - **[UNIFIED_TRAINING_GUIDE.md](UNIFIED_TRAINING_GUIDE.md)** - Complete training guide with all options
+- **[REWARD_SYSTEM_GUIDE.md](REWARD_SYSTEM_GUIDE.md)** - 🎁 Comprehensive reward system documentation with tuning guide
 - **[SB3_QUICKSTART.md](SB3_QUICKSTART.md)** - Quick reference for algorithms and parameters
 - **[TERRAIN_SYSTEM_README.md](TERRAIN_SYSTEM_README.md)** - Terrain physics and generation
 - **[CURRICULUM_TRAINING_GUIDE.md](CURRICULUM_TRAINING_GUIDE.md)** - Curriculum learning theory and stages
@@ -254,7 +377,12 @@ pip install --upgrade stable-baselines3[extra] gymnasium
 - **Observation normalization**: VecNormalize for zero-mean, unit-variance observations (improves stability)
 - **Action**: 4-dimensional continuous (main throttle + pitch/yaw/roll torque commands)
 - **Action smoothing**: Exponential moving average filter (80% old, 20% new) for stable control
-- **Reward**: Rebalanced composite function with terminal rewards ±500, gentle shaping rewards, fuel efficiency bonus on success only
+- **Reward**: Comprehensive multi-component system with:
+  - Terminal rewards (±1000): Dominant signals for success/failure
+  - Progress tracking (0-5): Continuous guidance toward landing
+  - Safety penalties (±2): Danger zone warnings and efficiency
+  - Control quality (±1): Smooth control and technique optimization
+- **Curriculum Learning**: 5 progressive stages with advancement requiring both mean reward threshold AND 60%+ success rate
 
 ---
 

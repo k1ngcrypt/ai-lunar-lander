@@ -21,7 +21,11 @@ This is a reinforcement learning project for training AI agents to perform auton
    - **Observation space**: 32D compact (position, velocity, Euler angles, IMU, fuel flow rate, time-to-impact, LIDAR azimuthal bins) or 200+ full
    - **Action space**: 4D compact (main throttle 0.4-1.0, pitch/yaw/roll torques ±1) or 9D full
    - **Action smoothing**: Exponential moving average (80% old, 20% new) for stable control
-   - **Reward shaping**: Rebalanced with terminal ±500, gentle shaping (0.1x), fuel efficiency bonus ONLY on success
+   - **Reward shaping**: Comprehensive multi-component architecture:
+     - Terminal rewards (±1000): Dominant signals for episode outcomes
+     - Progress tracking (0-5): Continuous guidance toward landing
+     - Safety penalties (±2): Danger zone warnings and efficiency
+     - Control quality (±1): Smooth control and technique optimization
    - **Termination**: Success (altitude < 5m, velocity < 3 m/s, upright), crash, or timeout
 
 3. **Training Layer** (`unified_training.py`): RL orchestration
@@ -87,12 +91,27 @@ check_env(env)
 
 ### Reward Function Philosophy (Critical for Tuning)
 **Located in**: `lunar_lander_env.py::_compute_reward()`
-- **Terminal rewards**: ±500 (5x larger than shaping) to dominate episode outcome - success +500, precision +200, fuel efficiency +100 (max ~700)
-- **Shaping rewards**: Scaled to 0.1x (gentle gradient) - exponential altitude penalty, velocity/attitude penalties
+
+**Comprehensive Multi-Component Architecture:**
+- **Terminal rewards**: ±1000 (10x larger than shaping) to dominate episode outcome
+  - Success +1000, precision +200, fuel efficiency +150 (quadratic, ONLY on success), softness +100, attitude +100, control smoothness +50
+- **Progress tracking**: 0-5 per step (continuous guidance) - descent profile, approach angle, proximity, attitude stability, final approach quality
+- **Safety penalties**: ±2 per step - danger zone warnings (speed/tilt/lateral), fuel management, loitering penalty
+- **Control quality**: ±1 per step - effort, jitter, spin rate penalties
 - **Success window**: 0-5m altitude (realistic), velocity < 3 m/s, horizontal < 2 m/s, attitude < 15°
-- **Fuel efficiency bonus**: +100 points ONLY on successful landing (prevents hoarding during flight)
-- **Crash penalty gradient**: Scales with impact severity (-250 to -750)
-- **DO NOT** add generic "exploration bonuses" - terrain randomization provides sufficient diversity
+- **Fuel efficiency bonus**: +150 points (quadratic curve) ONLY on successful landing (prevents hoarding during flight)
+- **Crash penalty gradient**: Scales with impact severity (-400 to -800)
+
+**Expected Cumulative Rewards:**
+- Perfect landing: 1200-1600 (all bonuses)
+- Good landing: 900-1200
+- Basic landing: 600-900
+- Poor landing: 400-600
+- Crash: -400 to -800
+
+**DO NOT** add generic "exploration bonuses" - terrain randomization provides sufficient diversity
+
+**For detailed tuning guide, see**: `REWARD_SYSTEM_GUIDE.md`
 
 ### Curriculum Stage Design Pattern
 **Located in**: `unified_training.py::_create_curriculum()`
@@ -194,9 +213,9 @@ Reference: SB3 docs for algorithm-specific params
 ## Performance Expectations
 - **Curriculum training**: 4-8 hours on modern CPU (16 cores, `--n-envs 8`)
 - **Final success rate**: 60-70% successful landings on extreme terrain (curriculum requires 60% to advance)
-- **Mean reward**: 400-700 (includes landing bonus + efficiency bonuses)
+- **Mean reward**: 800-1200 (includes terminal 1000 + bonuses up to 400)
 - **Landing criteria**: Altitude < 5m, velocity < 3 m/s, horizontal speed < 2 m/s, attitude < 15°
-- **Fuel efficiency**: Variable (bonus +100 awarded only on successful landing)
+- **Fuel efficiency**: Variable (bonus +150 awarded only on successful landing)
 
 ## When Asking Questions
 1. **For training issues**: Include TensorBoard metrics (`rollout/ep_rew_mean` trend) and command used

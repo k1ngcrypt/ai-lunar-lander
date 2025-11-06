@@ -898,10 +898,23 @@ class AdvancedThrusterController:
         """
         Compute and apply terrain contact forces from landing legs
         This is called every simulation timestep
+        
+        OPTIMIZED: Early exit when altitude > 50m (no contact possible)
         """
         # Get spacecraft state
         scState = self.scObject.scStateOutMsg.read()
         r_BN_N = scState.r_BN_N  # Position in inertial frame
+        
+        # PERFORMANCE OPTIMIZATION: Skip contact computation if too high
+        # Landing legs are at most 3m long, so no contact possible above 50m
+        if r_BN_N[2] > 50.0:
+            # Write zero forces
+            forceMsg = messaging.CmdForceBodyMsgPayload()
+            forceMsg.forceRequestInertial = np.zeros(3)
+            forceMsg.torqueRequestBody = np.zeros(3)
+            self.terrainForceMsg.write(forceMsg, self.moduleID, currentTime)
+            return
+        
         v_BN_N = scState.v_BN_N  # Velocity in inertial frame
         sigma_BN = scState.sigma_BN  # MRP attitude
         omega_BN_B = scState.omega_BN_B  # Angular velocity in body frame
