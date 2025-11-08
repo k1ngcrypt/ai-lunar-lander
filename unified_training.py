@@ -267,8 +267,8 @@ class UnifiedTrainer:
                 'observation_mode': 'compact',
                 'max_episode_steps': 1000
             }
-            # Add flag to avoid Basilisk warnings during reset
-            config['create_new_sim_on_reset'] = True
+            # Add flag to improve performance during reset
+            config['create_new_sim_on_reset'] = False
             env = LunarLanderEnv(**config)
             env.reset(seed=self.seed + rank)
             return env
