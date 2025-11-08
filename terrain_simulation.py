@@ -99,7 +99,7 @@ class LunarRegolithModel:
         print(f"  Resolution: {self.resolution} x {self.resolution}")
         print(f"  Cell size: {self.cell_size:.2f}m")
         print(f"\nLunar Regolith Properties:")
-        print(f"  Friction angle: {np.rad2deg(self.friction_angle):.1f}° (μ={self.friction_coeff:.2f})")
+        print(f"  Friction angle: {np.rad2deg(self.friction_angle):.1f}deg (mu={self.friction_coeff:.2f})")
         print(f"  Cohesion: {self.cohesion:.1f} N/m²")
         print(f"  Sinkage exponent: {self.soil_n}")
         print(f"  Restitution: {self.restitution}")
@@ -141,7 +141,7 @@ class LunarRegolithModel:
             self._classify_terrain_features()
             
             self.terrain_loaded = True
-            print(f"✓ Loaded terrain from: {filepath}")
+            print(f"[OK] Loaded terrain from: {filepath}")
             print(f"  Height range: [{np.min(self.heightmap):.2f}, {np.max(self.heightmap):.2f}] m")
             print(f"  Max slope: {np.rad2deg(np.arctan(np.max(self.slope_magnitude))):.1f}°")
             print(f"  Mean slope: {np.rad2deg(np.arctan(np.mean(self.slope_magnitude))):.1f}°")
