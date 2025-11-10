@@ -266,7 +266,6 @@ class UnifiedTrainer:
         """Create environment factory"""
         def _init():
             config = env_config or {
-                'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 1000
             }
@@ -380,7 +379,6 @@ class UnifiedTrainer:
             name="stage1_simple_landing",
             description="Learn basic landing from low altitude on flat terrain",
             env_config={
-                'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 600,
                 'initial_altitude_range': (50.0, 100.0),
@@ -403,7 +401,6 @@ class UnifiedTrainer:
             name="stage2_medium_descent",
             description="Controlled descent from medium altitude with gentle terrain",
             env_config={
-                'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 800,
                 'initial_altitude_range': (100.0, 300.0),
@@ -426,7 +423,6 @@ class UnifiedTrainer:
             name="stage3_high_descent",
             description="Learn long descent from high altitude with moderate terrain",
             env_config={
-                'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 1000,
                 'initial_altitude_range': (300.0, 800.0),  # Overlaps with stage 2
@@ -449,7 +445,6 @@ class UnifiedTrainer:
             name="stage4_challenging",
             description="Master landing on challenging terrain with varied conditions",
             env_config={
-                'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 1200,
                 'initial_altitude_range': (500.0, 1500.0),  # Wide range
@@ -472,7 +467,6 @@ class UnifiedTrainer:
             name="stage5_extreme",
             description="Master extreme landing scenarios (high altitude, high speed, rough terrain)",
             env_config={
-                'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 1500,
                 'initial_altitude_range': (500.0, 2000.0),
@@ -509,7 +503,6 @@ class UnifiedTrainer:
             # Test environment creation
             print("[1/4] Testing environment creation...")
             env = LunarLanderEnv(
-                action_mode='compact',
                 observation_mode='compact',
                 max_episode_steps=200,
                 create_new_sim_on_reset=True  # Avoid Basilisk warnings
@@ -589,7 +582,6 @@ class UnifiedTrainer:
                 name="demo_hover",
                 description="DEMO: Learn basic hovering",
                 env_config={
-                    'action_mode': 'compact',
                     'observation_mode': 'compact',
                     'max_episode_steps': 300,
                     'initial_altitude_range': (100.0, 150.0),
@@ -608,7 +600,6 @@ class UnifiedTrainer:
                 name="demo_descent",
                 description="DEMO: Learn controlled descent",
                 env_config={
-                    'action_mode': 'compact',
                     'observation_mode': 'compact',
                     'max_episode_steps': 500,
                     'initial_altitude_range': (200.0, 400.0),
@@ -627,7 +618,6 @@ class UnifiedTrainer:
                 name="demo_precision",
                 description="DEMO: Learn precision landing",
                 env_config={
-                    'action_mode': 'compact',
                     'observation_mode': 'compact',
                     'max_episode_steps': 800,
                     'initial_altitude_range': (400.0, 800.0),
@@ -1079,7 +1069,6 @@ class UnifiedTrainer:
         
         # Create environment
         config = env_config or {
-            'action_mode': 'compact',
             'observation_mode': 'compact',
             'render_mode': 'human' if render else None
         }

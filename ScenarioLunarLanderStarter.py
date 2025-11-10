@@ -159,7 +159,7 @@ lander.addDynamicEffector(terrainForceEff)
 # 3c. Setup Aerodynamics (minimal effect on Moon)
 # ----------------------------------------------------------------------
 # Moon has essentially no atmosphere (exosphere ~10^-15 kg/m³), but
-# aerodynamic effector is included for future Earth reentry simulations.
+# aerodynamic effector is included for realism and future Earth reentry simulations.
 
 dragEffector = dragDynamicEffector.DragDynamicEffector()
 dragEffector.ModelTag = "DragEffector"
@@ -534,11 +534,9 @@ class AISensorSuite:
         """
         Compute attitude error quaternion: q_error = q_target^-1 * q_current
         Returns quaternion representing rotation from current to target
-        
-        Note: Delegates to common_utils for implementation
         """
-        from common_utils import quaternion_error as compute_quaternion_error
-        return compute_quaternion_error(q_current, q_target)
+        from common_utils import quaternion_error
+        return quaternion_error(q_current, q_target)
     
     def update(self):
         """

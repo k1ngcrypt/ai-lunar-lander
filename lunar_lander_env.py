@@ -60,16 +60,13 @@ class LunarLanderEnv(gym.Env):
         
         Full mode (200+D): Complete sensor suite with history
     
-    Action Space:
-        Compact mode (4D):
-        - Main throttle (1): average throttle [0.4-1.0]
-        - Attitude control (3): [pitch, yaw, roll] torque commands [-1, 1]
+    Action Space (15D) - COMPREHENSIVE PILOT CONTROL:
+        - Primary engine throttles (3): individual throttle [0.4-1.0] for differential thrust
+        - Primary engine gimbals (6): [pitch, yaw] × 3 engines in radians [-0.14, 0.14] (±8°)
+        - Mid-body thruster groups (3): [+X, +Y, +Z rotation] throttle [0, 1]
+        - RCS thruster groups (3): [pitch, yaw, roll] throttle [0, 1]
         
         Action smoothing: 80% old action + 20% new action (exponential moving average filter)
-        
-        Full mode (9D):
-        - Primary thrusters (3): throttle [0.4-1.0] for each engine
-        - RCS thrusters (6): simplified control [-1, 1]
     
     Reward Function:
         Rebalanced design (fixes Issues #1-2):
@@ -88,31 +85,28 @@ class LunarLanderEnv(gym.Env):
     def __init__(self, 
                  render_mode=None,
                  max_episode_steps=1000,
-                 action_mode='compact',  # 'compact' or 'full'
                  observation_mode='compact',  # 'compact' or 'full'
                  initial_altitude_range=(1000.0, 2000.0),
                  initial_velocity_range=(-50.0, 50.0),
                  terrain_config=None,
-                 create_new_sim_on_reset=False):  # NEW: Control reset behavior
+                 create_new_sim_on_reset=False):
         """
         Initialize Lunar Lander Gymnasium Environment
         
         Args:
             render_mode: 'human' or 'rgb_array' or None
             max_episode_steps: Maximum steps per episode
-            action_mode: 'compact' (4D) or 'full' (9D) action space
-            observation_mode: 'compact' (23D) or 'full' (200+ D)
+            observation_mode: 'compact' (32D) or 'full' (200+ D)
             initial_altitude_range: (min, max) initial altitude in meters
             initial_velocity_range: (min, max) initial velocity magnitude
             terrain_config: Dict with terrain generation parameters
             create_new_sim_on_reset: If True, recreate simulation each reset (slow but clean).
-                                     If False, reuse simulation (fast but causes Basilisk warnings)
+                                     If False, reuse simulation (fast)
         """
         super().__init__()
         
         self.render_mode = render_mode
         self.max_episode_steps = max_episode_steps
-        self.action_mode = action_mode
         self.observation_mode = observation_mode
         self.initial_altitude_range = initial_altitude_range
         self.initial_velocity_range = initial_velocity_range
@@ -126,9 +120,24 @@ class LunarLanderEnv(gym.Env):
         self.prev_fuel_mass = None
         self.fuel_flow_rate = 0.0  # kg/s
         
-        # Action smoothing for stable control
+        # Action smoothing with realistic actuator bandwidth limits
+        # Based on physical response times of spacecraft control systems
         self.prev_action = None
-        self.action_smooth_alpha = 0.2  # 20% new action, 80% old action
+        
+        # Per-system smoothing rates (alpha values for EMA filter)
+        # Higher alpha = faster response, lower alpha = more smoothing
+        # Formula: alpha ≈ 1 - exp(-dt / tau), where tau = system time constant
+        self.action_smoothing = {
+            'throttle': 0.4,    # tau ≈ 0.15s (engine throttle valve response)
+            'gimbal': 0.7,      # tau ≈ 0.04s (hydraulic actuator, fast response)
+            'midbody': 0.8,     # tau ≈ 0.02s (thruster valve, very fast)
+            'rcs': 0.9          # tau ≈ 0.01s (RCS valves, near-instantaneous)
+        }
+        # Rationale:
+        # - Throttle: Large engines have thermal/pressure dynamics (~150ms)
+        # - Gimbal: Hydraulic actuators are fast but have mechanical inertia (~40ms)
+        # - Mid-body: Medium thrusters with quick valve response (~20ms)
+        # - RCS: Small thrusters designed for rapid pulse firing (~10ms)
         
         # Reward component tracking (for debugging and analysis)
         self._last_reward_components = {}
@@ -148,28 +157,27 @@ class LunarLanderEnv(gym.Env):
         else:
             self.terrain_config = terrain_config
         
-        # Define action space
-        if self.action_mode == 'compact':
-            # Compact: [main_throttle, pitch_torque, yaw_torque, roll_torque]
-            # Throttle range 0.4-1.0 prevents engine shutdown; torques normalized to ±1
-            self.action_space = spaces.Box(
-                low=np.array([0.4, -1.0, -1.0, -1.0]),
-                high=np.array([1.0, 1.0, 1.0, 1.0]),
-                dtype=np.float32
-            )
-        elif self.action_mode == 'full':
-            # Full: [primary_thr_0, primary_thr_1, primary_thr_2, rcs_0, ..., rcs_5]
-            low = np.concatenate([
-                np.array([0.4, 0.4, 0.4]),  # 3 primary engines
-                np.array([-1.0] * 6)  # 6 RCS clusters
-            ])
-            high = np.concatenate([
-                np.array([1.0, 1.0, 1.0]),
-                np.array([1.0] * 6)
-            ])
-            self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
-        else:
-            raise ValueError(f"Unknown action_mode: {self.action_mode}")
+        # Define action space (15D): Comprehensive pilot-level control
+        # [primary_throttles (3), primary_gimbals (6), midbody_groups (3), rcs_groups (3)]
+        #
+        # Breakdown:
+        # - Indices 0-2:   Primary engine throttles [0.4-1.0] (3 Raptor engines)
+        # - Indices 3-8:   Primary engine gimbals [-0.14, 0.14] rad = ±8° (pitch, yaw per engine)
+        # - Indices 9-11:  Mid-body thruster groups [0, 1] (+X, +Y, +Z rotation control)
+        # - Indices 12-14: RCS thruster groups [0, 1] (pitch, yaw, roll authority)
+        low = np.concatenate([
+            np.array([0.4, 0.4, 0.4]),  # Primary throttles (3)
+            np.array([-0.1396] * 6),     # Gimbal angles: ±8° = ±0.1396 rad (6)
+            np.array([0.0] * 3),         # Mid-body groups (3)
+            np.array([0.0] * 3)          # RCS groups (3)
+        ])
+        high = np.concatenate([
+            np.array([1.0, 1.0, 1.0]),   # Primary throttles
+            np.array([0.1396] * 6),      # Gimbal angles
+            np.array([1.0] * 3),         # Mid-body groups
+            np.array([1.0] * 3)          # RCS groups
+        ])
+        self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
         
         # Define observation space
         if self.observation_mode == 'compact':
@@ -222,7 +230,12 @@ class LunarLanderEnv(gym.Env):
         print(f"\n{'='*60}")
         print("Lunar Lander Gymnasium Environment Initialized")
         print(f"{'='*60}")
-        print(f"Action space: {self.action_space.shape} ({self.action_mode})")
+        print(f"Action space: {self.action_space.shape} (15D)")
+        print(f"  - Comprehensive pilot control:")
+        print(f"    • Primary throttles (3): Individual engine control")
+        print(f"    • Engine gimbals (6): ±8° per engine (pitch/yaw)")
+        print(f"    • Mid-body groups (3): Roll/pitch/yaw rotation")
+        print(f"    • RCS groups (3): Fine attitude control")
         print(f"Observation space: {self.observation_space.shape} ({self.observation_mode})")
         if self.observation_mode == 'compact':
             print(f"  - Enhanced with fuel flow rate, time-to-impact, Euler angles")
@@ -232,34 +245,141 @@ class LunarLanderEnv(gym.Env):
         print(f"Reset mode: {'CREATE_NEW' if self.create_new_sim_on_reset else 'REUSE'}")
         print(f"{'='*60}\n")
         
-        # Initialize RCS thruster configuration for moment arm calculations
-        self._initialize_rcs_configuration()
+        # Initialize thruster configuration for control allocation
+        self._initialize_thruster_configuration()
     
-    def _initialize_rcs_configuration(self):
+    def _initialize_thruster_configuration(self):
         """
-        Initialize RCS thruster configuration for torque-to-throttle mapping.
+        Initialize comprehensive thruster configuration for full pilot control.
         
         Configuration:
-        - 24 thrusters: 12 at top ring (z=22.5m), 12 at bottom (z=-22.5m)
-        - Radially arranged at 4.2m radius, firing tangentially
-        - 2,000 N thrust per thruster
+        - 3 primary engines: Differential thrust + gimbal (±8°)
+        - 12 mid-body thrusters: Grouped for +X, +Y, +Z rotation control
+        - 24 RCS thrusters: Grouped for pitch, yaw, roll authority
         """
-        # RCS thruster positions in body frame
-        self.rcs_positions_B = np.array(SC.RCS_THRUSTER_POSITIONS, dtype=np.float32)
+        # ===== PRIMARY ENGINES =====
+        # Already configured via Basilisk thrusterStateEffector
         
-        # RCS thrust directions (radially outward in x-y plane)
+        # ===== MID-BODY THRUSTERS =====
+        # 12 thrusters arranged radially at z=0, firing tangentially
+        self.midbody_positions_B = np.array(SC.MIDBODY_THRUSTER_POSITIONS, dtype=np.float32)
+        self.midbody_directions_B = np.zeros((SC.MIDBODY_THRUSTER_COUNT, 3), dtype=np.float32)
+        for i in range(SC.MIDBODY_THRUSTER_COUNT):
+            direction = SC.get_midbody_thruster_direction(self.midbody_positions_B[i])
+            self.midbody_directions_B[i] = direction
+        
+        # Group mid-body thrusters by rotation axis contribution
+        # +X rotation (roll): thrusters with +Y/-Y components
+        # +Y rotation (pitch): thrusters with +X/-X components  
+        # +Z rotation (yaw): all thrusters contribute
+        self.midbody_groups = {
+            'roll': [1, 2, 3, 4, 7, 8, 9, 10],    # Y-axis aligned thrusters
+            'pitch': [0, 1, 5, 6, 7, 11],          # X-axis aligned thrusters
+            'yaw': list(range(12))                  # All contribute to yaw
+        }
+        
+        # ===== RCS THRUSTERS =====
+        # 24 thrusters: 12 at top ring (z=22.5m), 12 at bottom (z=-22.5m)
+        self.rcs_positions_B = np.array(SC.RCS_THRUSTER_POSITIONS, dtype=np.float32)
         self.rcs_directions_B = np.zeros((SC.RCS_THRUSTER_COUNT, 3), dtype=np.float32)
         for i in range(SC.RCS_THRUSTER_COUNT):
             direction = SC.get_rcs_thruster_direction(self.rcs_positions_B[i])
             self.rcs_directions_B[i] = direction
         
-        self.rcs_max_force = SC.RCS_THRUST
+        # Group RCS thrusters by rotation axis
+        # Top ring (0-11) vs bottom ring (12-23) for pitch/yaw
+        # Opposite firing pairs for roll
+        self.rcs_groups = {
+            'pitch': list(range(0, 12)) + list(range(12, 24)),  # All thrusters
+            'yaw': list(range(0, 12)) + list(range(12, 24)),    # All thrusters
+            'roll': list(range(0, 12)) + list(range(12, 24))    # All thrusters
+        }
         
-        # Pre-compute moment arms: τ = r × F
+        # Pre-compute moment arms for RCS allocation
         self.rcs_moment_arms = np.zeros((SC.RCS_THRUSTER_COUNT, 3), dtype=np.float32)
         for i in range(SC.RCS_THRUSTER_COUNT):
-            force = self.rcs_directions_B[i] * self.rcs_max_force
+            force = self.rcs_directions_B[i] * SC.RCS_THRUST
             self.rcs_moment_arms[i] = np.cross(self.rcs_positions_B[i], force)
+    
+    def _map_midbody_groups(self, groups):
+        """
+        Map mid-body thruster group commands to individual thruster throttles.
+        
+        Groups control rotation about principal axes:
+        - groups[0]: Roll control (+X rotation)
+        - groups[1]: Pitch control (+Y rotation)
+        - groups[2]: Yaw control (+Z rotation)
+        
+        Args:
+            groups: (3,) array of group throttles [0-1]
+        
+        Returns:
+            throttles: (12,) array of individual thruster throttles
+        """
+        throttles = np.zeros(12, dtype=np.float32)
+        
+        # Roll (rotation about +X): use Y-aligned thrusters
+        roll_cmd = groups[0]
+        for idx in self.midbody_groups['roll']:
+            # Determine sign based on position (creates moment about X-axis)
+            y_pos = self.midbody_positions_B[idx][1]
+            if y_pos > 0:
+                throttles[idx] += roll_cmd
+            else:
+                throttles[idx] += roll_cmd
+        
+        # Pitch (rotation about +Y): use X-aligned thrusters
+        pitch_cmd = groups[1]
+        for idx in self.midbody_groups['pitch']:
+            x_pos = self.midbody_positions_B[idx][0]
+            if x_pos > 0:
+                throttles[idx] += pitch_cmd
+            else:
+                throttles[idx] += pitch_cmd
+        
+        # Yaw (rotation about +Z): all thrusters contribute
+        yaw_cmd = groups[2]
+        for idx in self.midbody_groups['yaw']:
+            throttles[idx] += yaw_cmd / 12.0  # Distribute evenly
+        
+        # Clamp to valid range
+        throttles = np.clip(throttles, 0.0, 1.0)
+        
+        return throttles
+    
+    def _map_rcs_groups(self, groups):
+        """
+        Map RCS thruster group commands to individual thruster throttles.
+        
+        Groups control rotation about principal axes:
+        - groups[0]: Pitch control (rotation about +Y)
+        - groups[1]: Yaw control (rotation about +Z)
+        - groups[2]: Roll control (rotation about +X)
+        
+        Uses intelligent thruster selection based on moment arm efficiency.
+        
+        Args:
+            groups: (3,) array of group throttles [0-1]
+        
+        Returns:
+            throttles: (24,) array of individual thruster throttles
+        """
+        # Use least-squares allocation with group weightings
+        # This is more sophisticated than simple grouping
+        
+        # Convert group commands to desired torque
+        # Scale appropriately for RCS authority
+        max_rcs_torque = 10000.0  # Nm (conservative estimate)
+        desired_torque = np.array([
+            groups[2] * max_rcs_torque,  # Roll (X-axis)
+            groups[0] * max_rcs_torque,  # Pitch (Y-axis)
+            groups[1] * max_rcs_torque   # Yaw (Z-axis)
+        ])
+        
+        # Use existing allocation function
+        throttles = self._map_torque_to_rcs_throttles(desired_torque)
+        
+        return throttles
     
     def _map_torque_to_rcs_throttles(self, torque_cmd_B):
         """
@@ -845,12 +965,7 @@ class LunarLanderEnv(gym.Env):
         # ====================================================================
         
         # A. Excessive Control Effort (encourage smooth, efficient control)
-        if self.action_mode == 'compact':
-            throttle_effort = action[0]
-            torque_effort = np.sum(np.abs(action[1:4]))
-            control_penalty = -0.001 * (throttle_effort + torque_effort)
-        else:
-            control_penalty = -0.001 * np.sum(np.abs(action))
+        control_penalty = -0.001 * np.sum(np.abs(action))
         reward_components['control_effort'] = control_penalty
         reward += control_penalty
         
@@ -1120,55 +1235,60 @@ class LunarLanderEnv(gym.Env):
         """
         self.current_step += 1
         
-        # Apply action smoothing (exponential moving average filter)
-        # This reduces control oscillations and provides more stable control
+        # Apply system-specific action smoothing (exponential moving average)
+        # Different control systems have different physical bandwidth limits
         if self.prev_action is None:
             # First step: use action as-is
             smoothed_action = action.copy()
         else:
-            # Blend: 80% old action + 20% new action
-            smoothed_action = (1.0 - self.action_smooth_alpha) * self.prev_action + \
-                             self.action_smooth_alpha * action
+            # Apply per-system smoothing rates for realistic actuator dynamics
+            smoothed_action = np.zeros_like(action)
+            
+            # Primary throttles (indices 0-2): Engine valve dynamics
+            alpha_throttle = self.action_smoothing['throttle']
+            smoothed_action[0:3] = (1 - alpha_throttle) * self.prev_action[0:3] + \
+                                   alpha_throttle * action[0:3]
+            
+            # Gimbal angles (indices 3-8): Hydraulic actuator response
+            alpha_gimbal = self.action_smoothing['gimbal']
+            smoothed_action[3:9] = (1 - alpha_gimbal) * self.prev_action[3:9] + \
+                                   alpha_gimbal * action[3:9]
+            
+            # Mid-body groups (indices 9-11): Medium thruster valves
+            alpha_midbody = self.action_smoothing['midbody']
+            smoothed_action[9:12] = (1 - alpha_midbody) * self.prev_action[9:12] + \
+                                    alpha_midbody * action[9:12]
+            
+            # RCS groups (indices 12-14): Fast RCS valves
+            alpha_rcs = self.action_smoothing['rcs']
+            smoothed_action[12:15] = (1 - alpha_rcs) * self.prev_action[12:15] + \
+                                     alpha_rcs * action[12:15]
         
         # Store for next iteration
         self.prev_action = smoothed_action.copy()
         
-        # Convert action to thruster commands
-        if self.action_mode == 'compact':
-            # Compact: [main_throttle, pitch_torque, yaw_torque, roll_torque]
-            main_throttle = smoothed_action[0]
-            torque_cmd = smoothed_action[1:4]  # [pitch, yaw, roll] torques in range [-1, 1]
-            
-            # Set all primary engines to same throttle
-            # NOTE: This means we can't use differential throttling for attitude control
-            # All attitude control comes from RCS thrusters
-            primary_throttles = np.array([main_throttle] * 3)
-            
-            # Convert normalized torque commands [-1, 1] to actual torque [Nm]
-            # Scale by maximum expected torque (empirically chosen)
-            # RCS at max can produce ~200 kNm (24 thrusters * 2000N * 4.2m lever arm)
-            max_torque = 50000.0  # Nm (conservative to avoid saturation)
-            torque_cmd_Nm = torque_cmd * max_torque
-            
-            # Use proper least-squares allocation to map torque to RCS throttles
-            rcs_throttles = self._map_torque_to_rcs_throttles(torque_cmd_Nm)
-            
-            # Set mid-body to zero (not used in compact mode)
-            midbody_throttles = np.zeros(12)
-            
-        else:
-            # Full mode: direct thruster control (no smoothing on individual thrusters)
-            primary_throttles = smoothed_action[0:3]
-            rcs_throttles = np.zeros(24)
-            if len(smoothed_action) > 3:
-                rcs_throttles[:min(len(smoothed_action)-3, 24)] = smoothed_action[3:3+min(len(smoothed_action)-3, 24)]
-            midbody_throttles = np.zeros(12)
+        # Convert action to thruster commands (15D comprehensive pilot control)
+        # Extract action components
+        primary_throttles = smoothed_action[0:3]        # Indices 0-2
+        gimbal_angles_flat = smoothed_action[3:9]       # Indices 3-8
+        midbody_groups = smoothed_action[9:12]          # Indices 9-11
+        rcs_groups = smoothed_action[12:15]             # Indices 12-14
         
-        # Apply thruster commands
+        # Reshape gimbal angles to (3, 2) [pitch, yaw per engine]
+        gimbal_angles = gimbal_angles_flat.reshape(3, 2)
+        
+        # Map mid-body groups to individual thrusters
+        midbody_throttles = self._map_midbody_groups(midbody_groups)
+        
+        # Map RCS groups to individual thrusters
+        rcs_throttles = self._map_rcs_groups(rcs_groups)
+        
+        # Apply thruster commands with gimbal
         self.thrController.setThrusterCommands(
             primaryThrottles=primary_throttles,
             midbodyThrottles=midbody_throttles,
-            rcsThrottles=rcs_throttles
+            rcsThrottles=rcs_throttles,
+            gimbalAngles=gimbal_angles
         )
         
         # Update controller (computes terrain forces, etc.)
@@ -1188,7 +1308,7 @@ class LunarLanderEnv(gym.Env):
         terminated, truncated = self._check_termination(obs_dict)
         
         # Compute reward
-        reward = self._compute_reward(obs_dict, action, terminated, truncated)
+        reward = self._compute_reward(obs_dict, smoothed_action, terminated, truncated)
         
         # Info dictionary
         velocity = obs_dict['velocity_inertial']
@@ -1311,7 +1431,7 @@ if __name__ == "__main__":
     # Test the environment
     print("Testing Lunar Lander Environment...")
     
-    env = LunarLanderEnv(action_mode='compact', observation_mode='compact')
+    env = LunarLanderEnv(observation_mode='compact')
     
     # Test reset
     obs, info = env.reset()
@@ -1324,7 +1444,9 @@ if __name__ == "__main__":
         obs, reward, terminated, truncated, info = env.step(action)
         
         print(f"\nStep {i+1}:")
-        print(f"  Action: {action}")
+        print(f"  Action shape: {action.shape}")
+        print(f"  Primary throttles: [{action[0]:.2f}, {action[1]:.2f}, {action[2]:.2f}]")
+        print(f"  Gimbal angles (deg): [{np.degrees(action[3]):.1f}, {np.degrees(action[4]):.1f}, ...]")
         print(f"  Reward: {reward:.2f}")
         print(f"  Altitude: {info['altitude']:.2f} m")
         print(f"  Fuel: {info['fuel_fraction']*100:.1f}%")

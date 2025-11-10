@@ -17,7 +17,6 @@ Usage:
 import numpy as np
 import os
 import argparse
-from common_utils import fade, lerp
 
 
 def perlin_noise_2d(shape, scale=10.0, octaves=6, persistence=0.5, lacunarity=2.0, seed=None):
