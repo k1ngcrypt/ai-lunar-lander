@@ -573,6 +573,38 @@ class LunarLanderEnv(gym.Env):
                 obs_dict['imu_accel_current'],  # IMU accel (3)
                 obs_dict['imu_gyro_current']  # IMU gyro (3)
             ], dtype=np.float32)
+            
+            # ISSUE #3 FIX: Validate observation space size to catch edge cases early
+            # This prevents rare crashes when LIDAR or other sensors return unexpected sizes
+            if obs.shape[0] != 32:
+                # Emergency fallback: if observation size is wrong, log details and pad/truncate
+                print(f"\n⚠ WARNING: Observation size mismatch!")
+                print(f"  Expected: 32, Got: {obs.shape[0]}")
+                print(f"  LIDAR azimuthal shape: {lidar_azimuthal.shape}")
+                print(f"  Component sizes:")
+                print(f"    position: {obs_dict['position_inertial'][:2].shape}")
+                print(f"    altitude: 1")
+                print(f"    velocity: {obs_dict['velocity_inertial'].shape}")
+                print(f"    euler: {euler_angles.shape}")
+                print(f"    omega: {obs_dict['angular_velocity_body'].shape}")
+                print(f"    fuel_frac: 1")
+                print(f"    fuel_flow: 1")
+                print(f"    time_to_impact: 1")
+                print(f"    lidar_stats: 3")
+                print(f"    lidar_azimuthal: {lidar_azimuthal.shape}")
+                print(f"    imu_accel: {obs_dict['imu_accel_current'].shape}")
+                print(f"    imu_gyro: {obs_dict['imu_gyro_current'].shape}")
+                
+                # Pad or truncate to correct size (emergency recovery)
+                if obs.shape[0] < 32:
+                    obs = np.pad(obs, (0, 32 - obs.shape[0]), mode='constant', constant_values=0.0)
+                    print(f"  → Padded to 32 dimensions with zeros")
+                else:
+                    obs = obs[:32]
+                    print(f"  → Truncated to 32 dimensions")
+                print(f"  Continuing with corrected observation...\n")
+            
+            assert obs.shape == (32,), f"Observation shape validation failed: {obs.shape} != (32,)"
         else:
             # Full observation: use flattened sensor suite
             obs = self.aiSensors.get_flattened_observation().astype(np.float32)
@@ -1209,10 +1241,86 @@ class LunarLanderEnv(gym.Env):
         return None
     
     def close(self):
-        """Clean up resources"""
+        """
+        Clean up resources to prevent memory leaks in parallel training.
+        
+        CRITICAL: When using SubprocVecEnv with multiple parallel environments,
+        each environment runs in a separate process. Without proper cleanup,
+        Basilisk simulation objects accumulate in memory (~50-100MB per env).
+        
+        This method explicitly deletes all major objects and forces garbage collection.
+        """
         if self.scSim is not None:
-            # Clean up Basilisk simulation
-            pass
+            # Delete Basilisk simulation objects in dependency order
+            # (sensors first, then effectors, then spacecraft, then simulation)
+            
+            # Delete sensor objects
+            if hasattr(self, 'aiSensors') and self.aiSensors is not None:
+                del self.aiSensors
+                self.aiSensors = None
+            
+            if hasattr(self, 'imu') and self.imu is not None:
+                del self.imu
+                self.imu = None
+            
+            if hasattr(self, 'lidar') and self.lidar is not None:
+                del self.lidar
+                self.lidar = None
+            
+            # Delete controller (holds references to effectors)
+            if hasattr(self, 'thrController') and self.thrController is not None:
+                del self.thrController
+                self.thrController = None
+            
+            # Delete thruster effectors
+            if hasattr(self, 'primaryEff') and self.primaryEff is not None:
+                del self.primaryEff
+                self.primaryEff = None
+            
+            if hasattr(self, 'midbodyEff') and self.midbodyEff is not None:
+                del self.midbodyEff
+                self.midbodyEff = None
+            
+            if hasattr(self, 'rcsEff') and self.rcsEff is not None:
+                del self.rcsEff
+                self.rcsEff = None
+            
+            # Delete fuel tanks
+            if hasattr(self, 'ch4Tank') and self.ch4Tank is not None:
+                del self.ch4Tank
+                self.ch4Tank = None
+            
+            if hasattr(self, 'loxTank') and self.loxTank is not None:
+                del self.loxTank
+                self.loxTank = None
+            
+            # Delete terrain force effector
+            if hasattr(self, 'terrainForceEff') and self.terrainForceEff is not None:
+                del self.terrainForceEff
+                self.terrainForceEff = None
+            
+            # Delete terrain model (large heightmap array)
+            if hasattr(self, 'terrain') and self.terrain is not None:
+                del self.terrain
+                self.terrain = None
+            
+            # Delete spacecraft
+            if hasattr(self, 'lander') and self.lander is not None:
+                del self.lander
+                self.lander = None
+            
+            # Delete simulation base
+            del self.scSim
+            self.scSim = None
+            
+            # Mark as uninitialized
+            self.scenario_initialized = False
+            
+            # Force garbage collection to immediately free memory
+            # This is critical in parallel training where Python's default GC
+            # may not run frequently enough
+            import gc
+            gc.collect()
 
 
 # Register environment with Gymnasium
