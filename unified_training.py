@@ -857,6 +857,23 @@ class UnifiedTrainer:
                     print(f"⚠ Failed {stage_attempts[stage_idx]} times. REGRESSING to Stage {stage_idx}...\n")
                     stage_idx -= 1  # Go back one stage
                     
+                    # Load the model from the previous stage to restore successful weights
+                    previous_stage_name = self.curriculum_stages[stage_idx].name
+                    previous_model_path = os.path.join(self.save_dir, f'{previous_stage_name}_final')
+                    
+                    if os.path.exists(previous_model_path + '.zip'):
+                        print(f"  Loading model from previous stage: {previous_model_path}")
+                        if self.algorithm == 'ppo':
+                            self.model = PPO.load(previous_model_path)
+                        elif self.algorithm == 'sac':
+                            self.model = SAC.load(previous_model_path)
+                        elif self.algorithm == 'td3':
+                            self.model = TD3.load(previous_model_path)
+                        print(f"  ✓ Model loaded successfully from {previous_stage_name}")
+                    else:
+                        print(f"  ⚠ Previous stage model not found at {previous_model_path}")
+                        print(f"  Continuing with current model weights (transfer learning)")
+                    
                 else:
                     # Stage 1 failure - adjust expectations
                     print(f"⚠ Stage 1 not mastered after {stage_attempts[stage_idx]} attempts.")
@@ -924,7 +941,10 @@ class UnifiedTrainer:
                 print(self.model.policy)
         else:
             # Update environment for existing model
+            # CRITICAL: This ensures the model uses the correct environment for this stage
             self.model.set_env(env)
+            if self.verbose > 0:
+                print(f"\n✓ Model environment updated for stage: {stage.name}")
         
         # Setup callbacks
         checkpoint_callback = CheckpointCallback(
