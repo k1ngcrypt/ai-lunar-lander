@@ -240,6 +240,9 @@ class UnifiedTrainer:
         # Model instance
         self.model = None
         
+        # VecNormalize stats tracking (for curriculum stage transitions)
+        self.current_vecnormalize_path = None
+        
         # Curriculum stages
         self.curriculum_stages = self._create_curriculum()
         
@@ -267,8 +270,8 @@ class UnifiedTrainer:
                 'observation_mode': 'compact',
                 'max_episode_steps': 1000
             }
-            # Add flag to avoid Basilisk warnings during reset
-            config['create_new_sim_on_reset'] = True
+            # Add flag to improve performance during reset
+            config['create_new_sim_on_reset'] = False
             env = LunarLanderEnv(**config)
             env.reset(seed=self.seed + rank)
             return env
@@ -360,22 +363,19 @@ class UnifiedTrainer:
     
     def _create_curriculum(self) -> List[CurriculumStage]:
         """
-        Define curriculum stages with OPTIMIZED reward scale:
-        - All success thresholds scaled to new reward system (terminal ±1000)
-        - Stage 1 teaches LANDING, not just hovering
-        - Reduced max_timesteps to prevent overfitting (100k-400k per stage)
-        - Progressive difficulty with smooth transitions
-        - Min_episodes increased for better mastery verification
+        Define 5-stage curriculum with progressive difficulty.
         
-        New Reward Scale:
-        - Perfect landing: 800-1200 (terminal 1000 + bonuses 200-400)
-        - Good landing: 600-800
-        - Poor landing: 200-400
+        Reward scale (see REWARD_SYSTEM_GUIDE.md):
+        - Perfect landing: 1200-1600
+        - Good landing: 900-1200
+        - Basic landing: 600-900
         - Crash: -400 to -800
+        
+        Advancement requires BOTH mean reward > threshold AND 60% success rate.
         """
         stages = []
         
-        # Stage 1: Simple Landing on Flat Terrain
+        # Stage 1: Basic landing on flat terrain
         stages.append(CurriculumStage(
             name="stage1_simple_landing",
             description="Learn basic landing from low altitude on flat terrain",
@@ -383,30 +383,30 @@ class UnifiedTrainer:
                 'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 600,
-                'initial_altitude_range': (50.0, 100.0),  # Lower start altitude
-                'initial_velocity_range': (-5.0, 5.0),     # Some initial velocity
+                'initial_altitude_range': (50.0, 100.0),
+                'initial_velocity_range': (-5.0, 5.0),
                 'terrain_config': {
                     'size': 1000.0,
                     'resolution': 100,
-                    'num_craters': 0,                      # Flat terrain
+                    'num_craters': 0,  # Flat terrain
                     'crater_depth_range': (0, 0),
                     'crater_radius_range': (0, 0)
                 }
             },
-            success_threshold=400.0,    # Basic landing: 400+ (includes terminal 1000, minus shaping penalties)
-            min_episodes=200,           # More episodes for mastery
-            max_timesteps=100_000       # Reduced to prevent overfitting
+            success_threshold=400.0,
+            min_episodes=200,
+            max_timesteps=100_000
         ))
         
-        # Stage 2: Medium Altitude with Gentle Terrain
+        # Stage 2: Medium altitude with gentle terrain
         stages.append(CurriculumStage(
             name="stage2_medium_descent",
-            description="Learn controlled descent from medium altitude with gentle terrain",
+            description="Controlled descent from medium altitude with gentle terrain",
             env_config={
                 'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 800,
-                'initial_altitude_range': (100.0, 300.0),  # Overlaps with stage 1 max
+                'initial_altitude_range': (100.0, 300.0),
                 'initial_velocity_range': (-10.0, 10.0),
                 'terrain_config': {
                     'size': 1500.0,
@@ -416,7 +416,7 @@ class UnifiedTrainer:
                     'crater_radius_range': (30, 50)
                 }
             },
-            success_threshold=600.0,     # Good landing required (includes some bonuses)
+            success_threshold=600.0,
             min_episodes=200,
             max_timesteps=150_000
         ))
@@ -853,9 +853,33 @@ class UnifiedTrainer:
                     # Stay at current stage (will retry on next iteration)
                     
                 elif stage_idx > 0:
-                    # Regress to previous stage if repeated failures
-                    print(f"⚠ Failed {stage_attempts[stage_idx]} times. REGRESSING to Stage {stage_idx}...\n")
+                    # ISSUE #4 FIX: Regress to previous stage with proper state restoration
+                    # Reload both the model AND VecNormalize stats from previous stage
+                    print(f"⚠ Failed {stage_attempts[stage_idx]} times. REGRESSING to Stage {stage_idx}...")
                     stage_idx -= 1  # Go back one stage
+                    
+                    # Restore previous stage's model
+                    prev_stage = self.curriculum_stages[stage_idx]
+                    prev_model_path = os.path.join(self.save_dir, f'{prev_stage.name}_best', 'best_model.zip')
+                    if os.path.exists(prev_model_path):
+                        print(f"  Reloading model from: {prev_model_path}")
+                        if self.algorithm == 'ppo':
+                            self.model = PPO.load(prev_model_path)
+                        elif self.algorithm == 'sac':
+                            self.model = SAC.load(prev_model_path)
+                        elif self.algorithm == 'td3':
+                            self.model = TD3.load(prev_model_path)
+                        print("  ✓ Model restored to previous stage")
+                    else:
+                        print(f"  ⚠ Previous model not found, keeping current model")
+                    
+                    # Restore previous stage's VecNormalize stats
+                    prev_vecnorm_path = os.path.join(self.save_dir, f'{prev_stage.name}_vecnormalize.pkl')
+                    if os.path.exists(prev_vecnorm_path):
+                        self.current_vecnormalize_path = prev_vecnorm_path
+                        print(f"  ✓ VecNormalize stats will reload from: {prev_vecnorm_path}")
+                    
+                    print(f"  Regression complete. Resuming Stage {stage_idx + 1}.\n")
                     
                 else:
                     # Stage 1 failure - adjust expectations
@@ -910,11 +934,30 @@ class UnifiedTrainer:
         else:
             env = DummyVecEnv([self._make_env(stage.env_config)])
         
-        # ISSUE #3 FIX: Add observation normalization
-        env = self._normalize_env(env, training=True)
+        # ISSUE #2 FIX: Load previous VecNormalize stats for curriculum continuity
+        # This prevents catastrophic forgetting when transitioning between stages
+        vecnormalize_path = os.path.join(self.save_dir, f'{stage.name}_vecnormalize.pkl')
         
+        if self.current_vecnormalize_path and os.path.exists(self.current_vecnormalize_path):
+            # Load previous stage's normalization statistics
+            print(f"Loading VecNormalize stats from: {self.current_vecnormalize_path}")
+            try:
+                env = VecNormalize.load(self.current_vecnormalize_path, env)
+                # Continue updating statistics (don't freeze them)
+                env.training = True
+                env.norm_reward = True
+                print("  ✓ VecNormalize stats loaded successfully")
+            except Exception as e:
+                print(f"  ⚠ Failed to load VecNormalize stats: {e}")
+                print("  Creating fresh VecNormalize wrapper")
+                env = self._normalize_env(env, training=True)
+        else:
+            # First stage or no previous stats - create fresh
+            env = self._normalize_env(env, training=True)
+        
+        # Create eval environment (observation normalization only, no reward normalization)
         eval_env = DummyVecEnv([self._make_env(stage.env_config, n_envs)])
-        eval_env = self._normalize_env(eval_env, training=False)  # Eval: obs normalization only
+        eval_env = self._normalize_env(eval_env, training=False)
         
         # Create or update model
         if self.model is None:
@@ -969,6 +1012,12 @@ class UnifiedTrainer:
         stage_path = os.path.join(self.save_dir, f'{stage.name}_final')
         self.model.save(stage_path)
         print(f"\n✓ Stage model saved: {stage_path}")
+        
+        # ISSUE #2 FIX: Save VecNormalize statistics for next stage
+        # Critical for curriculum learning - preserves observation scaling knowledge
+        env.save(vecnormalize_path)
+        self.current_vecnormalize_path = vecnormalize_path
+        print(f"✓ VecNormalize stats saved: {vecnormalize_path}")
         
         # Evaluate with success tracking
         mean_reward, std_reward, success_rate = self._evaluate_model_with_success(
