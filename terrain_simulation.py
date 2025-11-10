@@ -294,8 +294,10 @@ class LunarRegolithModel:
     
     def get_terrain_properties(self, x, y):
         """
-        Get local terrain properties (friction, hardness) at position.
-        Returns dict with properties that vary based on terrain type.
+        Get local terrain properties at position (x, y).
+        
+        Returns:
+            dict: friction_coeff, is_boulder, is_bedrock, cohesion
         """
         if not self.terrain_loaded:
             return {
@@ -373,26 +375,22 @@ class LunarRegolithModel:
         terrain_props = self.get_terrain_properties(x, y)
         
         # Penetration depth (positive when below surface)
-        # Measure along surface normal for slopes
         penetration = terrain_height - z
         
         if penetration <= 0:
-            # No contact
             return np.zeros(3)
         
         # ══════════════════════════════════════════════════════════════
         # NORMAL FORCE (Bekker bearing capacity model)
         # ══════════════════════════════════════════════════════════════
-        # p = (k_c/b + k_phi) * z^n  (pressure at depth z)
-        # F_n = ∫ p dA ≈ (k_c/b + k_phi) * z^n * A
+        # Pressure: p = (k_c/b + k_phi) * z^n
+        # Force: F_n = p * A
         
-        # Effective contact width (affects cohesive term)
-        b = max(contact_width, 0.1)  # Avoid division by zero
+        b = max(contact_width, 0.1)
         
-        # Bekker pressure (N/m²)
         if terrain_props['is_boulder'] or terrain_props['is_bedrock']:
-            # Hard contact: much higher bearing strength
-            bearing_pressure = 500000.0 * (penetration ** 1.0)  # Nearly linear, very stiff
+            # Hard surface: high stiffness, nearly linear
+            bearing_pressure = 500000.0 * (penetration ** 1.0)
         else:
             # Soft regolith: Bekker model
             cohesive_term = self.soil_k_c / b + terrain_props['cohesion'] / b
@@ -417,19 +415,17 @@ class LunarRegolithModel:
         # ══════════════════════════════════════════════════════════════
         # LATERAL SHEAR FORCE (Janosi-Hanamoto model)
         # ══════════════════════════════════════════════════════════════
-        # τ = (c + σ tan φ) * (1 - e^(-j/K))
-        # where j = lateral slip, K = shear deformation parameter
+        # Shear stress: τ = (c + σ tan φ) * (1 - e^(-j/K))
+        # j = slip distance, K = shear deformation parameter
         
-        # Lateral velocity (perpendicular to normal)
         v_lateral_vec = velocity_vec - v_normal * terrain_normal
         v_lateral_speed = np.linalg.norm(v_lateral_vec)
         
         if v_lateral_speed > 1e-6:
-            # Lateral slip distance (approximation: j ≈ v_lateral * dt)
-            # Use characteristic slip of K for full mobilization
-            slip_distance = v_lateral_speed * 0.1  # Assume 0.1s time scale
+            # Approximate slip distance over characteristic time
+            slip_distance = v_lateral_speed * 0.1
             
-            # Shear strength components
+            # Maximum shear stress
             cohesive_shear = terrain_props['cohesion']
             frictional_shear = bearing_pressure * np.tan(self.friction_angle)
             max_shear_stress = cohesive_shear + frictional_shear

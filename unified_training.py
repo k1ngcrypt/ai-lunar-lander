@@ -363,22 +363,19 @@ class UnifiedTrainer:
     
     def _create_curriculum(self) -> List[CurriculumStage]:
         """
-        Define curriculum stages with OPTIMIZED reward scale:
-        - All success thresholds scaled to new reward system (terminal ±1000)
-        - Stage 1 teaches LANDING, not just hovering
-        - Reduced max_timesteps to prevent overfitting (100k-400k per stage)
-        - Progressive difficulty with smooth transitions
-        - Min_episodes increased for better mastery verification
+        Define 5-stage curriculum with progressive difficulty.
         
-        New Reward Scale:
-        - Perfect landing: 800-1200 (terminal 1000 + bonuses 200-400)
-        - Good landing: 600-800
-        - Poor landing: 200-400
+        Reward scale (see REWARD_SYSTEM_GUIDE.md):
+        - Perfect landing: 1200-1600
+        - Good landing: 900-1200
+        - Basic landing: 600-900
         - Crash: -400 to -800
+        
+        Advancement requires BOTH mean reward > threshold AND 60% success rate.
         """
         stages = []
         
-        # Stage 1: Simple Landing on Flat Terrain
+        # Stage 1: Basic landing on flat terrain
         stages.append(CurriculumStage(
             name="stage1_simple_landing",
             description="Learn basic landing from low altitude on flat terrain",
@@ -386,30 +383,30 @@ class UnifiedTrainer:
                 'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 600,
-                'initial_altitude_range': (50.0, 100.0),  # Lower start altitude
-                'initial_velocity_range': (-5.0, 5.0),     # Some initial velocity
+                'initial_altitude_range': (50.0, 100.0),
+                'initial_velocity_range': (-5.0, 5.0),
                 'terrain_config': {
                     'size': 1000.0,
                     'resolution': 100,
-                    'num_craters': 0,                      # Flat terrain
+                    'num_craters': 0,  # Flat terrain
                     'crater_depth_range': (0, 0),
                     'crater_radius_range': (0, 0)
                 }
             },
-            success_threshold=400.0,    # Basic landing: 400+ (includes terminal 1000, minus shaping penalties)
-            min_episodes=200,           # More episodes for mastery
-            max_timesteps=100_000       # Reduced to prevent overfitting
+            success_threshold=400.0,
+            min_episodes=200,
+            max_timesteps=100_000
         ))
         
-        # Stage 2: Medium Altitude with Gentle Terrain
+        # Stage 2: Medium altitude with gentle terrain
         stages.append(CurriculumStage(
             name="stage2_medium_descent",
-            description="Learn controlled descent from medium altitude with gentle terrain",
+            description="Controlled descent from medium altitude with gentle terrain",
             env_config={
                 'action_mode': 'compact',
                 'observation_mode': 'compact',
                 'max_episode_steps': 800,
-                'initial_altitude_range': (100.0, 300.0),  # Overlaps with stage 1 max
+                'initial_altitude_range': (100.0, 300.0),
                 'initial_velocity_range': (-10.0, 10.0),
                 'terrain_config': {
                     'size': 1500.0,
@@ -419,7 +416,7 @@ class UnifiedTrainer:
                     'crater_radius_range': (30, 50)
                 }
             },
-            success_threshold=600.0,     # Good landing required (includes some bonuses)
+            success_threshold=600.0,
             min_episodes=200,
             max_timesteps=150_000
         ))

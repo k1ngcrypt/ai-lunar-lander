@@ -151,16 +151,17 @@ class LunarLanderEnv(gym.Env):
         # Define action space
         if self.action_mode == 'compact':
             # Compact: [main_throttle, pitch_torque, yaw_torque, roll_torque]
+            # Throttle range 0.4-1.0 prevents engine shutdown; torques normalized to ±1
             self.action_space = spaces.Box(
                 low=np.array([0.4, -1.0, -1.0, -1.0]),
                 high=np.array([1.0, 1.0, 1.0, 1.0]),
                 dtype=np.float32
             )
         elif self.action_mode == 'full':
-            # Full: [thr0, thr1, thr2, rcs0, rcs1, rcs2, rcs3, rcs4, rcs5]
+            # Full: [primary_thr_0, primary_thr_1, primary_thr_2, rcs_0, ..., rcs_5]
             low = np.concatenate([
-                np.array([0.4, 0.4, 0.4]),  # Primary throttles
-                np.array([-1.0] * 6)  # RCS controls
+                np.array([0.4, 0.4, 0.4]),  # 3 primary engines
+                np.array([-1.0] * 6)  # 6 RCS clusters
             ])
             high = np.concatenate([
                 np.array([1.0, 1.0, 1.0]),
@@ -170,12 +171,12 @@ class LunarLanderEnv(gym.Env):
         else:
             raise ValueError(f"Unknown action_mode: {self.action_mode}")
         
-        # Define observation space (will be finalized after simulation setup)
+        # Define observation space
         if self.observation_mode == 'compact':
-            # Compact: 32D observation (upgraded from 23D)
-            # Breakdown: pos(2) + alt(1) + vel(3) + euler(3) + omega(3) + 
-            #            fuel_frac(1) + fuel_flow(1) + time_to_impact(1) + 
-            #            lidar_stats(3) + lidar_azimuthal(8) + imu_accel(3) + imu_gyro(3) = 32
+            # Compact: 32D observation vector
+            # pos(2), alt(1), vel(3), euler_angles(3), omega(3), fuel_frac(1),
+            # fuel_flow(1), time_to_impact(1), lidar_stats(3), lidar_azimuthal(8),
+            # imu_accel(3), imu_gyro(3)
             self.observation_space = spaces.Box(
                 low=-np.inf,
                 high=np.inf,
@@ -183,7 +184,7 @@ class LunarLanderEnv(gym.Env):
                 dtype=np.float32
             )
         else:
-            # Will be set in _create_simulation
+            # Full mode: finalized after simulation setup
             self.observation_space = None
         
         # Target landing zone
@@ -236,79 +237,65 @@ class LunarLanderEnv(gym.Env):
     
     def _initialize_rcs_configuration(self):
         """
-        Initialize RCS thruster positions and directions for proper torque-to-throttle mapping.
-        Uses configuration from starship_constants module.
+        Initialize RCS thruster configuration for torque-to-throttle mapping.
         
-        RCS Layout:
-        - 24 thrusters total: 12 at top ring (z=22.5m), 12 at bottom ring (z=-22.5m)
-        - Each ring has 12 thrusters evenly spaced around a 4.2m radius circle
-        - All thrusters fire radially outward (tangential to the circle)
-        - Each thruster produces 2,000 N
+        Configuration:
+        - 24 thrusters: 12 at top ring (z=22.5m), 12 at bottom (z=-22.5m)
+        - Radially arranged at 4.2m radius, firing tangentially
+        - 2,000 N thrust per thruster
         """
-        # RCS thruster positions (from starship_constants module)
+        # RCS thruster positions in body frame
         self.rcs_positions_B = np.array(SC.RCS_THRUSTER_POSITIONS, dtype=np.float32)
         
-        # RCS thrust directions (radially outward, normalized)
+        # RCS thrust directions (radially outward in x-y plane)
         self.rcs_directions_B = np.zeros((SC.RCS_THRUSTER_COUNT, 3), dtype=np.float32)
         for i in range(SC.RCS_THRUSTER_COUNT):
-            # Direction: radially outward in x-y plane (no z component)
             direction = SC.get_rcs_thruster_direction(self.rcs_positions_B[i])
             self.rcs_directions_B[i] = direction
         
-        # RCS thruster max force
-        self.rcs_max_force = SC.RCS_THRUST  # Newtons
+        self.rcs_max_force = SC.RCS_THRUST
         
-        # Pre-compute moment arms for torque calculation
-        # Torque = r × F, where r is position and F is force
+        # Pre-compute moment arms: τ = r × F
         self.rcs_moment_arms = np.zeros((SC.RCS_THRUSTER_COUNT, 3), dtype=np.float32)
         for i in range(SC.RCS_THRUSTER_COUNT):
-            # Moment arm for each thruster when firing at max thrust
             force = self.rcs_directions_B[i] * self.rcs_max_force
             self.rcs_moment_arms[i] = np.cross(self.rcs_positions_B[i], force)
     
     def _map_torque_to_rcs_throttles(self, torque_cmd_B):
         """
-        Map desired torque command to RCS thruster throttles using least-squares allocation.
+        Map desired torque to RCS thruster throttles via least-squares allocation.
         
-        This solves the inverse problem: given desired torque τ, find thruster throttles f
-        such that Σ(r_i × F_i) ≈ τ, where:
-        - r_i is the position of thruster i
-        - F_i = f_i * direction_i * max_force (f_i ∈ [0, 1])
-        - τ is the desired torque vector in body frame
+        Solves: min ||A @ throttles - τ||² subject to 0 ≤ throttles ≤ 1
+        where A contains moment arms (r_i × F_i) for each thruster.
         
         Args:
-            torque_cmd_B: (3,) desired torque [Nm] in body frame [pitch, yaw, roll]
-                         (Basilisk convention: +X forward, +Y right, +Z down/nose)
+            torque_cmd_B: (3,) desired torque [Nm] in body frame
         
         Returns:
-            throttles: (RCS_THRUSTER_COUNT,) array of RCS throttle values [0, 1]
+            throttles: (RCS_THRUSTER_COUNT,) array in [0, 1]
         """
-        # Build the moment arm matrix A where A @ throttles ≈ torque_cmd_B
-        # Each column i represents the torque contribution of thruster i at full throttle
-        A = self.rcs_moment_arms.T  # Shape: (3, RCS_THRUSTER_COUNT)
+        # A: (3 × 24) matrix of torque contributions per thruster
+        A = self.rcs_moment_arms.T
         
-        # Solve least-squares: min ||A @ throttles - torque_cmd_B||^2
-        # Subject to: 0 <= throttles <= 1
-        # np.linalg.lstsq solves A @ x = b, so we pass A (not A.T) and torque_cmd_B
+        # Least-squares solution
         throttles, residuals, rank, s = np.linalg.lstsq(A, torque_cmd_B, rcond=None)
         
-        # Clip to valid throttle range [0, 1]
+        # Clamp to valid range
         throttles = np.clip(throttles, 0.0, 1.0)
         
-        # Optional: Apply threshold to avoid very small activations (reduces chatter)
-        threshold = 0.05  # Only fire thrusters if throttle > 5%
+        # Threshold to reduce thruster chatter
+        threshold = 0.05
         throttles[throttles < threshold] = 0.0
         
         return throttles.astype(np.float32)
     
     def _create_simulation(self):
         """
-        Create Basilisk simulation environment using components from ScenarioLunarLanderStarter
+        Create Basilisk simulation environment.
         
-        This method creates a fresh simulation using the classes defined in
-        ScenarioLunarLanderStarter.py without running the scenario's main simulation.
+        Initializes spacecraft, sensors, terrain, and flight software components
+        from ScenarioLunarLanderStarter without running standalone simulation.
         """
-        # Import the classes we need (not the running scenario)
         from terrain_simulation import LunarRegolithModel
         from ScenarioLunarLanderStarter import (
             LIDARSensor, AISensorSuite, 
@@ -317,17 +304,16 @@ class LunarLanderEnv(gym.Env):
         from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody
         from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
         
-        # Create simulation base
         self.scSim = SimulationBaseClass.SimBaseClass()
         
-        # Create processes
+        # Create dynamics and FSW processes
         simProcessName = "simProcess"
         dynTaskName = "dynTask"
         fswTaskName = "fswTask"
         
         dynProcess = self.scSim.CreateNewProcess(simProcessName)
-        simulationTimeStep = macros.sec2nano(self.dt)
-        fswTimeStep = macros.sec2nano(0.5)
+        simulationTimeStep = macros.sec2nano(self.dt)  # 0.1s dynamics timestep
+        fswTimeStep = macros.sec2nano(0.5)  # 0.5s FSW update rate
         
         dynProcess.addTask(self.scSim.CreateNewTask(dynTaskName, simulationTimeStep))
         dynProcess.addTask(self.scSim.CreateNewTask(fswTaskName, fswTimeStep))
@@ -660,32 +646,24 @@ class LunarLanderEnv(gym.Env):
     
     def _compute_reward(self, obs_dict, action, terminated, truncated):
         """
-        Compute reward for current state-action pair
-        
-        COMPREHENSIVE OPTIMIZED REWARD SYSTEM:
+        Compute reward for current state-action pair.
         
         Architecture:
-        1. Terminal Rewards (±1000): Dominant signals for episode outcomes
-        2. Progress Tracking (0-5): Continuous guidance toward successful landing
-        3. Safety & Efficiency (±2): Penalties/bonuses for safe, fuel-efficient flight
-        4. Control Quality (±1): Smooth control and proper techniques
-        
-        Design Philosophy:
-        - Terminal rewards dominate (10x larger than shaping) to clearly signal success/failure
-        - Progressive rewards increase as agent approaches landing (altitude-gated)
-        - Fuel efficiency rewarded ONLY on success (prevents hoarding)
-        - Multi-dimensional success criteria (velocity, position, attitude, fuel)
-        - Penalties scale with severity (worse violations = worse penalties)
+        1. Terminal Rewards (±1000): Episode outcome signals
+        2. Progress Tracking (0-5/step): Continuous guidance
+        3. Safety & Efficiency (±2/step): Warnings and fuel management
+        4. Control Quality (±1/step): Smooth operation
         
         Expected Cumulative Rewards:
-        - Perfect landing: 800-1200 (terminal 1000 + bonuses 200-400)
-        - Good landing: 600-800
-        - Poor landing: 200-400
+        - Perfect landing: 1200-1600
+        - Good landing: 900-1200
+        - Basic landing: 600-900
         - Crash: -400 to -800
-        - Timeout/abort: -200 to -400
+        
+        See REWARD_SYSTEM_GUIDE.md for detailed documentation.
         """
         reward = 0.0
-        reward_components = {}  # For debugging and analysis
+        reward_components = {}
         
         # Extract state variables
         altitude = obs_dict['altitude_terrain']
@@ -703,54 +681,52 @@ class LunarLanderEnv(gym.Env):
         angular_rate = np.linalg.norm(angular_velocity)
         
         # ====================================================================
-        # 1. TERMINAL REWARDS (±1000 scale, dominates episode outcome)
+        # 1. TERMINAL REWARDS (±1000 scale)
         # ====================================================================
         if terminated:
-            if altitude < 5.0 and altitude > -0.5:  # In landing zone
-                # Define success criteria
+            if altitude < 5.0 and altitude > -0.5:  # Landing zone
+                # Success criteria
                 vertical_ok = abs(vertical_vel) < 3.0
                 horizontal_ok = horizontal_speed < 2.0
                 position_ok = horizontal_distance < 20.0
                 attitude_ok = np.degrees(attitude_error) < 15.0
                 
                 if vertical_ok and horizontal_ok and position_ok and attitude_ok:
-                    # ========== SUCCESS ==========
+                    # SUCCESS
                     base_success = 1000.0
                     reward_components['terminal_success'] = base_success
                     reward += base_success
                     
-                    # Precision bonus (0-200): Reward accurate landing
+                    # Precision bonus (0-200)
                     precision_score = 1.0 - (horizontal_distance / 20.0)
                     precision_bonus = 200.0 * max(0, precision_score)
                     reward_components['precision_bonus'] = precision_bonus
                     reward += precision_bonus
                     
-                    # Softness bonus (0-100): Reward gentle touchdown
+                    # Softness bonus (0-100)
                     softness_score = 1.0 - (abs(vertical_vel) / 3.0)
                     softness_bonus = 100.0 * max(0, softness_score)
                     reward_components['softness_bonus'] = softness_bonus
                     reward += softness_bonus
                     
-                    # Attitude bonus (0-100): Reward upright landing
+                    # Attitude bonus (0-100)
                     attitude_score = 1.0 - (np.degrees(attitude_error) / 15.0)
                     attitude_bonus = 100.0 * max(0, attitude_score)
                     reward_components['attitude_bonus'] = attitude_bonus
                     reward += attitude_bonus
                     
-                    # Fuel efficiency bonus (0-150): ONLY on success
-                    # Quadratic curve: rewards high fuel remaining exponentially
+                    # Fuel efficiency bonus (0-150, ONLY on success)
                     fuel_efficiency = 150.0 * (fuel_fraction ** 1.5)
                     reward_components['fuel_efficiency'] = fuel_efficiency
                     reward += fuel_efficiency
                     
-                    # Control smoothness bonus (0-50): Reward stable approach
+                    # Control smoothness bonus (0-50)
                     control_smoothness = 50.0 * max(0, 1.0 - angular_rate / 0.1)
                     reward_components['control_smoothness'] = control_smoothness
                     reward += control_smoothness
                     
                 else:
-                    # ========== HARD LANDING ==========
-                    # Calculate multi-dimensional failure severity
+                    # HARD LANDING (in zone but violates criteria)
                     vel_violation = max(0, abs(vertical_vel) - 3.0) / 3.0
                     horiz_violation = max(0, horizontal_speed - 2.0) / 2.0
                     pos_violation = max(0, horizontal_distance - 20.0) / 20.0

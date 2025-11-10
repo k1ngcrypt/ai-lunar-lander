@@ -156,33 +156,29 @@ scSim.AddModelToTask(dynTaskName, terrainForceEff)
 lander.addDynamicEffector(terrainForceEff)
 
 # ----------------------------------------------------------------------
-# 3c. Setup Aerodynamics (for Moon landing - minimal atmosphere)
+# 3c. Setup Aerodynamics (minimal effect on Moon)
 # ----------------------------------------------------------------------
-# Starship HLS aerodynamic parameters:
-# - Reference area (frontal): 63.617 m²
-# - Drag coefficient: 0.6
-# Note: Moon has essentially no atmosphere, but we'll add the model
-# for completeness/testing. Set minimal atmosphere density.
+# Moon has essentially no atmosphere (exosphere ~10^-15 kg/m³), but
+# aerodynamic effector is included for future Earth reentry simulations.
 
 dragEffector = dragDynamicEffector.DragDynamicEffector()
 dragEffector.ModelTag = "DragEffector"
-dragEffector.coreParams.projectedArea = 63.617  # m² - Frontal area
-dragEffector.coreParams.dragCoeff = 0.6  # Drag coefficient
-dragEffector.coreParams.comOffset = [0.0, 0.0, 0.0]  # No COM offset
+dragEffector.coreParams.projectedArea = 63.617  # m² (π × radius²)
+dragEffector.coreParams.dragCoeff = 0.6
+dragEffector.coreParams.comOffset = [0.0, 0.0, 0.0]
 
 # Add drag effector to spacecraft
 lander.addDynamicEffector(dragEffector)
 scSim.AddModelToTask(dynTaskName, dragEffector)
 
-# Create minimal atmosphere model for Moon (very low density)
-# Moon's exosphere is ~10^-15 kg/m³, essentially vacuum
+# Moon exosphere model (essentially vacuum)
 moonAtmo = exponentialAtmosphere.ExponentialAtmosphere()
 moonAtmo.ModelTag = "MoonAtmosphere"
-moonAtmo.planetRadius = moon.radEquator  # Moon's radius
-moonAtmo.scaleHeight = 100000.0  # m - arbitrary large value
-moonAtmo.baseDensity = 1e-15  # kg/m³ - essentially vacuum
-moonAtmo.envMinReach = -10000.0  # m
-moonAtmo.envMaxReach = 10000.0  # m
+moonAtmo.planetRadius = moon.radEquator
+moonAtmo.scaleHeight = 100000.0  # m (arbitrary large value)
+moonAtmo.baseDensity = 1e-15  # kg/m³ (Moon's exosphere density)
+moonAtmo.envMinReach = -10000.0
+moonAtmo.envMaxReach = 10000.0
 moonAtmo.addSpacecraftToModel(lander.scStateOutMsg)
 scSim.AddModelToTask(dynTaskName, moonAtmo)
 
