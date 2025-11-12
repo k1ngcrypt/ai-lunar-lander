@@ -104,10 +104,13 @@ tensorboard --logdir=./logs
 ├── lunar_lander_env.py              # Gymnasium environment
 ├── ScenarioLunarLanderStarter.py    # Basilisk simulation setup
 ├── generate_terrain.py              # Terrain generation utilities
+├── terrain_simulation.py            # Lunar regolith physics model
+├── common_utils.py                  # Shared utility functions
+├── starship_constants.py            # Starship HLS physical constants
 │
-├── UNIFIED_TRAINING_GUIDE.md        # 📖 Complete training documentation
-├── SB3_QUICKSTART.md                # Quick reference for Stable Baselines3
-├── TERRAIN_SYSTEM_README.md         # Terrain physics details
+├── README.md                        # 📖 This file - quick start guide
+├── REWARD_SYSTEM_GUIDE.md           # 🎁 Comprehensive reward system documentation
+├── PRODUCTION_CHECKLIST.md          # ✅ Production deployment guide
 │
 ├── basilisk/                        # Astrodynamics simulation framework
 ├── generated_terrain/               # Generated terrain heightmaps
@@ -192,8 +195,6 @@ python unified_training.py --mode curriculum --resume-curriculum
 # Or manually specify checkpoint (standard mode)
 python unified_training.py --mode standard --resume ./models/checkpoints/ppo_lunar_lander_450000_steps
 ```
-
-📖 **For detailed save/resume documentation, see [SAVE_RESUME_GUIDE.md](SAVE_RESUME_GUIDE.md)**
 
 ---
 
@@ -331,12 +332,17 @@ Each episode's info dict includes `reward_components` with detailed breakdown of
 
 ## 📚 Documentation
 
-- **[SAVE_RESUME_GUIDE.md](SAVE_RESUME_GUIDE.md)** - 💾 Complete save/resume training guide
-- **[UNIFIED_TRAINING_GUIDE.md](UNIFIED_TRAINING_GUIDE.md)** - Complete training guide with all options
+- **[README.md](README.md)** - This file: Quick start guide and overview
 - **[REWARD_SYSTEM_GUIDE.md](REWARD_SYSTEM_GUIDE.md)** - 🎁 Comprehensive reward system documentation with tuning guide
-- **[SB3_QUICKSTART.md](SB3_QUICKSTART.md)** - Quick reference for algorithms and parameters
-- **[TERRAIN_SYSTEM_README.md](TERRAIN_SYSTEM_README.md)** - Terrain physics and generation
-- **[CURRICULUM_TRAINING_GUIDE.md](CURRICULUM_TRAINING_GUIDE.md)** - Curriculum learning theory and stages
+- **[PRODUCTION_CHECKLIST.md](PRODUCTION_CHECKLIST.md)** - ✅ Production deployment checklist and validation guide
+
+### Key Code Files
+- **[unified_training.py](unified_training.py)** - Main training script with curriculum learning
+- **[lunar_lander_env.py](lunar_lander_env.py)** - Gymnasium environment implementation
+- **[ScenarioLunarLanderStarter.py](ScenarioLunarLanderStarter.py)** - Basilisk simulation setup
+- **[generate_terrain.py](generate_terrain.py)** - Procedural lunar terrain generation
+- **[terrain_simulation.py](terrain_simulation.py)** - Lunar regolith physics (Bekker-Wong model)
+- **[starship_constants.py](starship_constants.py)** - Starship HLS physical constants
 
 ---
 
@@ -465,4 +471,4 @@ Start here:
 python unified_training.py --mode test
 ```
 
-Then read **[UNIFIED_TRAINING_GUIDE.md](UNIFIED_TRAINING_GUIDE.md)** for complete documentation.
+For more details, see the [Documentation](#-documentation) section above.

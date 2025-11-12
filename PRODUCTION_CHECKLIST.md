@@ -26,16 +26,16 @@
   - ✓ Basilisk simulation runs without errors
   - ✓ Model training completes 5,000 steps
 
-- [ ] **Verify all critical fixes are applied**
-  - ✓ Observation size validation in `_process_lidar_azimuthal()` (Issue #1)
-  - ✓ VecNormalize state validation during curriculum load (Issue #2)
-  - ✓ Reset sequence timing fix (setState before InitializeSimulation) (Issue #3)
-  - ✓ Basilisk import error handling with helpful messages (Issue #4)
-  - ✓ Stage-specific success rate thresholds (40%-65%) (Issue #5)
-  - ✓ Curriculum state validation in `_load_training_state()` (Issue #6)
-  - ✓ Terrain contact optimization (10m early exit) (Issue #7)
-  - ✓ Episode timeout logging for debugging (Issue #8)
-  - ✓ Enhanced memory cleanup in `close()` method (Issue #9)
+- [ ] **Verify all critical features are implemented**
+  - ✓ Observation size validation in `_process_lidar_azimuthal()`
+  - ✓ VecNormalize state validation during curriculum load
+  - ✓ Reset sequence timing (setState before InitializeSimulation)
+  - ✓ Basilisk import error handling with helpful messages
+  - ✓ Stage-specific success rate thresholds (40%-65%)
+  - ✓ Curriculum state validation in `_load_training_state()`
+  - ✓ Terrain contact optimization (10m early exit)
+  - ✓ Episode timeout logging for debugging
+  - ✓ Enhanced memory cleanup in `close()` method
 
 - [ ] **Test edge cases**
   ```bash
