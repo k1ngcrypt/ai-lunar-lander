@@ -366,7 +366,7 @@ class UnifiedTrainer:
                         with open(path, 'r') as f:
                             state = json.load(f)
                     
-                    # PRODUCTION FIX: Validate loaded state
+                    # Validate loaded state before using it
                     required_keys = ['stage_idx', 'stage_attempts', 'timestamp']
                     if not all(k in state for k in required_keys):
                         print(f"⚠ Warning: Incomplete training state in {path}")
@@ -458,7 +458,7 @@ class UnifiedTrainer:
     def _normalize_env(self, env, training: bool = True):
         """
         Wrap environment with VecNormalize for observation/reward normalization.
-        This fixes Issue #3: Observation space inefficiencies.
+        This provides zero-mean, unit-variance observations for improved training stability.
         
         Args:
             env: Vectorized environment (DummyVecEnv or SubprocVecEnv)
@@ -874,7 +874,7 @@ class UnifiedTrainer:
         else:
             env = DummyVecEnv([self._make_env()])
         
-        # ISSUE #3 FIX: Add observation normalization
+        # Add observation normalization for training stability
         # If resuming, try to load previous VecNormalize stats
         vecnormalize_path = os.path.join(self.save_dir, 'checkpoints', 'vecnormalize.pkl')
         if resume_path and os.path.exists(vecnormalize_path):
@@ -1096,8 +1096,8 @@ class UnifiedTrainer:
             # Check advancement criteria
             reward_passed = mean_reward >= stage.success_threshold
             
-            # PRODUCTION FIX: Stage-specific success rate thresholds
-            # Early stages need lower thresholds to allow exploration
+            # Stage-specific success rate thresholds
+            # Early stages have lower thresholds to allow exploration
             SUCCESS_RATE_THRESHOLDS = {
                 0: 0.40,  # Stage 1: 40% (learning basics)
                 1: 0.50,  # Stage 2: 50%
@@ -1127,7 +1127,7 @@ class UnifiedTrainer:
                     # Stay at current stage (will retry on next iteration)
                     
                 elif stage_idx > 0:
-                    # ISSUE #4 FIX: Regress to previous stage with proper state restoration
+                    # Regress to previous stage with proper state restoration
                     # Reload both the model AND VecNormalize stats from previous stage
                     print(f"⚠ Failed {stage_attempts[stage_idx]} times. REGRESSING to Stage {stage_idx}...")
                     stage_idx -= 1  # Go back one stage
@@ -1217,7 +1217,7 @@ class UnifiedTrainer:
         else:
             env = DummyVecEnv([self._make_env(stage.env_config)])
         
-        # ISSUE #2 FIX: Load previous VecNormalize stats for curriculum continuity
+        # Load previous VecNormalize stats for curriculum continuity
         # This prevents catastrophic forgetting when transitioning between stages
         vecnormalize_path = os.path.join(self.save_dir, f'{stage.name}_vecnormalize.pkl')
         
@@ -1230,7 +1230,7 @@ class UnifiedTrainer:
                 env.training = True
                 env.norm_reward = True
                 
-                # PRODUCTION FIX: Validate statistics loaded correctly
+                # Validate statistics loaded correctly before proceeding
                 if not hasattr(env, 'obs_rms') or env.obs_rms is None:
                     raise ValueError("VecNormalize obs_rms not properly initialized")
                 if not hasattr(env, 'ret_rms') or env.ret_rms is None:
@@ -1306,7 +1306,7 @@ class UnifiedTrainer:
         self.model.save(stage_path)
         print(f"\n✓ Stage model saved: {stage_path}")
         
-        # ISSUE #2 FIX: Save VecNormalize statistics for next stage
+        # Save VecNormalize statistics for next stage
         # Critical for curriculum learning - preserves observation scaling knowledge
         env.save(vecnormalize_path)
         self.current_vecnormalize_path = vecnormalize_path

@@ -89,11 +89,13 @@ class LunarLanderEnv(gym.Env):
         Action smoothing: 80% old action + 20% new action (exponential moving average filter)
     
     Reward Function:
-        Rebalanced design (fixes Issues #1-2):
-        - Terminal rewards: ±500 (5x larger) - success +500, precision +200, fuel +100
-        - Shaping rewards: Scaled to 0.1x for gentle gradient (exponential altitude penalty)
+        Comprehensive multi-component architecture:
+        - Terminal rewards: ±1000 (10x larger than shaping) - success +1000, precision +200, fuel efficiency +150
+        - Progress tracking: 0-5 per step for continuous guidance (descent profile, approach angle, proximity)
+        - Safety penalties: ±2 per step for danger zone warnings and efficiency
+        - Control quality: ±1 per step for smooth, efficient control
         - Fuel efficiency bonus: ONLY on successful landing (prevents hoarding)
-        - Success window: 0-5m altitude, velocity < 3 m/s, attitude < 15°
+        - Success window: 0-5m altitude, velocity < 3 m/s, horizontal < 2 m/s, attitude < 15°
     
     Reset Optimization:
         Uses Basilisk state engine for direct state updates (eliminates warnings, 100x faster)
@@ -700,7 +702,7 @@ class LunarLanderEnv(gym.Env):
                 obs_dict['imu_gyro_current']  # IMU gyro (3)
             ], dtype=np.float32)
             
-            # ISSUE #3 FIX: Validate observation space size to catch edge cases early
+            # Validate observation space size to catch edge cases early
             # This prevents rare crashes when LIDAR or other sensors return unexpected sizes
             if obs.shape[0] != 32:
                 # Emergency fallback: if observation size is wrong, log details and pad/truncate
@@ -744,7 +746,7 @@ class LunarLanderEnv(gym.Env):
         This provides spatial awareness while keeping observation space compact
         
         OPTIMIZED: Vectorized implementation for 3x performance improvement
-        PRODUCTION FIX: Added input validation to prevent dimension mismatches
+        Includes input validation to prevent dimension mismatches
         
         Args:
             point_cloud: (N, 3) array of 3D points in body frame
@@ -757,7 +759,7 @@ class LunarLanderEnv(gym.Env):
         # Bin 0: North (337.5-22.5°), Bin 1: NE (22.5-67.5°), etc.
         azimuthal_ranges = np.full(8, 999.0, dtype=np.float32)  # Initialize with large values
         
-        # PRODUCTION FIX: Validate inputs before processing
+        # Validate inputs before processing
         if point_cloud is None or ranges is None:
             return azimuthal_ranges
         
@@ -1072,7 +1074,7 @@ class LunarLanderEnv(gym.Env):
         # Truncation: Time limit reached
         if self.current_step >= self.max_episode_steps:
             truncated = True
-            # PRODUCTION FIX: Log timeout details for debugging
+            # Log timeout details for debugging when verbose mode is enabled
             if hasattr(self, 'verbose') and self.verbose > 0:
                 print(f"\n⚠ Episode timeout at step {self.current_step}/{self.max_episode_steps}")
                 print(f"  Altitude: {altitude:.1f}m (terrain-relative)")
@@ -1221,7 +1223,7 @@ class LunarLanderEnv(gym.Env):
             # Reset simulation time to 0 AFTER setState
             self.scSim.TotalSim.CurrentNanos = 0
             
-            # PRODUCTION FIX: Call InitializeSimulation AFTER setState to ensure integrator
+            # Call InitializeSimulation AFTER setState to ensure integrator
             # caches are invalidated with the new state values already in place.
             # This ensures the first observation reflects the new episode's initial conditions.
             self.scSim.InitializeSimulation()
@@ -1449,7 +1451,7 @@ class LunarLanderEnv(gym.Env):
             # Mark as uninitialized
             self.scenario_initialized = False
             
-            # PRODUCTION FIX: Delete cached arrays to free memory
+            # Delete cached arrays to free memory
             if hasattr(self, 'rcs_moment_arms'):
                 del self.rcs_moment_arms
             if hasattr(self, 'midbody_positions_B'):
