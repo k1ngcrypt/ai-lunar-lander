@@ -1113,6 +1113,20 @@ class LunarLanderEnv(gym.Env):
         # Reset reward tracking (prevents reward component leakage)
         self._last_reward_components = {}
         
+        # ============================================================
+        # TERRAIN RANDOMIZATION (Critical for generalization)
+        # ============================================================
+        # Regenerate terrain for each episode to ensure agent learns to land
+        # on a variety of terrains. Uses Gymnasium's RNG for reproducibility.
+        # This prevents overfitting to a single terrain configuration.
+        terrain_seed = self.np_random.integers(0, 2**31 - 1)
+        self.terrain.rng = np.random.RandomState(terrain_seed)
+        self.terrain.generate_procedural_terrain(
+            num_craters=self.terrain_config['num_craters'],
+            crater_depth_range=self.terrain_config['crater_depth_range'],
+            crater_radius_range=self.terrain_config['crater_radius_range']
+        )
+        
         # Randomize initial conditions using Gymnasium's RNG (set by super().reset(seed=seed))
         # NOTE: Using self.np_random instead of np.random ensures proper seeding behavior
         
@@ -1188,8 +1202,11 @@ class LunarLanderEnv(gym.Env):
             #    ✓ Thruster commands reset via message passing
             #    ✓ Terrain forces reset to zero
             #
+            # 5. TERRAIN STATE:
+            #    ✓ Terrain regenerated with new random seed (prevents overfitting)
+            #    ✓ New crater positions, depths, and surface roughness per episode
+            #
             # What is NOT reset (and doesn't need to be):
-            #    - Terrain model (static, shared across episodes)
             #    - Thruster configuration (static)
             #    - Sensor configuration (static)
             #    - RCS moment arms (static, pre-computed)
