@@ -264,7 +264,7 @@ class UnifiedTrainer:
     
     def __init__(self,
                  algorithm: str = 'ppo',
-                 n_envs: int = 4,
+                 n_envs: int = 12,  # OPTIMIZED: Increased from 4 to 12 for i7-14700K (20 cores)
                  save_dir: str = './models',
                  log_dir: str = './logs',
                  seed: int = 42,
@@ -485,8 +485,8 @@ class UnifiedTrainer:
                 policy='MlpPolicy',
                 env=env,
                 learning_rate=learning_rate,
-                n_steps=kwargs.get('n_steps', 2048),
-                batch_size=kwargs.get('batch_size', 64),
+                n_steps=kwargs.get('n_steps', 4096),      # OPTIMIZED: 2x from 2048 (more samples per update)
+                batch_size=kwargs.get('batch_size', 512),  # OPTIMIZED: 8x from 64 (leverage GPU/RAM)
                 n_epochs=kwargs.get('n_epochs', 10),
                 gamma=kwargs.get('gamma', 0.99),
                 gae_lambda=kwargs.get('gae_lambda', 0.95),
@@ -497,7 +497,7 @@ class UnifiedTrainer:
                 verbose=self.verbose,
                 tensorboard_log=self.log_dir,
                 seed=self.seed,
-                device='auto'
+                device='cuda'  # OPTIMIZED: Force GPU (RTX 4080) instead of 'auto'
             )
         
         elif self.algorithm == 'sac':
@@ -505,8 +505,8 @@ class UnifiedTrainer:
                 policy='MlpPolicy',
                 env=env,
                 learning_rate=learning_rate,
-                buffer_size=kwargs.get('buffer_size', 100_000),
-                batch_size=kwargs.get('batch_size', 256),
+                buffer_size=kwargs.get('buffer_size', 200_000),   # OPTIMIZED: 2x from 100k (64GB RAM)
+                batch_size=kwargs.get('batch_size', 1024),        # OPTIMIZED: 4x from 256 (GPU memory)
                 tau=kwargs.get('tau', 0.005),
                 gamma=kwargs.get('gamma', 0.99),
                 train_freq=kwargs.get('train_freq', 1),
@@ -514,7 +514,7 @@ class UnifiedTrainer:
                 verbose=self.verbose,
                 tensorboard_log=self.log_dir,
                 seed=self.seed,
-                device='auto'
+                device='cuda'  # OPTIMIZED: Force GPU (RTX 4080)
             )
         
         elif self.algorithm == 'td3':
@@ -522,8 +522,8 @@ class UnifiedTrainer:
                 policy='MlpPolicy',
                 env=env,
                 learning_rate=learning_rate,
-                buffer_size=kwargs.get('buffer_size', 100_000),
-                batch_size=kwargs.get('batch_size', 100),
+                buffer_size=kwargs.get('buffer_size', 200_000),   # OPTIMIZED: 2x from 100k (64GB RAM)
+                batch_size=kwargs.get('batch_size', 512),         # OPTIMIZED: 5x from 100 (GPU memory)
                 tau=kwargs.get('tau', 0.005),
                 gamma=kwargs.get('gamma', 0.99),
                 train_freq=kwargs.get('train_freq', (1, 'episode')),
@@ -531,7 +531,7 @@ class UnifiedTrainer:
                 verbose=self.verbose,
                 tensorboard_log=self.log_dir,
                 seed=self.seed,
-                device='auto'
+                device='cuda'  # OPTIMIZED: Force GPU (RTX 4080)
             )
         
         else:
@@ -572,7 +572,7 @@ class UnifiedTrainer:
             },
             success_threshold=400.0,
             min_episodes=200,
-            max_timesteps=100_000
+            max_timesteps=200_000  # OPTIMIZED: 2x from 100k (high-end hardware)
         ))
         
         # Stage 2: Medium altitude with gentle terrain
@@ -594,7 +594,7 @@ class UnifiedTrainer:
             },
             success_threshold=600.0,
             min_episodes=200,
-            max_timesteps=150_000
+            max_timesteps=300_000  # OPTIMIZED: 2x from 150k (high-end hardware)
         ))
         
         # Stage 3: High Altitude with Moderate Terrain
@@ -616,7 +616,7 @@ class UnifiedTrainer:
             },
             success_threshold=700.0,     # Fuel efficiency starts mattering
             min_episodes=250,
-            max_timesteps=200_000
+            max_timesteps=400_000  # OPTIMIZED: 2x from 200k (high-end hardware)
         ))
         
         # Stage 4: Challenging Terrain and Conditions
@@ -638,7 +638,7 @@ class UnifiedTrainer:
             },
             success_threshold=800.0,     # High-quality landings expected
             min_episodes=300,
-            max_timesteps=300_000
+            max_timesteps=600_000  # OPTIMIZED: 2x from 300k (high-end hardware)
         ))
         
         # Stage 5: Extreme Conditions (Final Test)
@@ -660,7 +660,7 @@ class UnifiedTrainer:
             },
             success_threshold=900.0,     # Near-optimal performance: high precision + fuel efficiency
             min_episodes=400,
-            max_timesteps=400_000
+            max_timesteps=800_000  # OPTIMIZED: 2x from 400k (high-end hardware)
         ))
         
         return stages
@@ -918,7 +918,7 @@ class UnifiedTrainer:
         
         # Setup callbacks
         checkpoint_callback = CheckpointCallback(
-            save_freq=50_000,
+            save_freq=100_000,  # OPTIMIZED: Reduced I/O frequency (from 50k to 100k)
             save_path=os.path.join(self.save_dir, 'checkpoints'),
             name_prefix=f'{self.algorithm}_lunar_lander',
             save_replay_buffer=False,
@@ -1264,7 +1264,7 @@ class UnifiedTrainer:
         
         # Setup callbacks
         checkpoint_callback = CheckpointCallback(
-            save_freq=50_000 if not demo else 5_000,
+            save_freq=100_000 if not demo else 5_000,  # OPTIMIZED: Reduced I/O (from 50k to 100k)
             save_path=os.path.join(self.save_dir, f'{stage.name}_checkpoints'),
             name_prefix=f'{self.algorithm}_{stage.name}',
             save_replay_buffer=False,
@@ -1530,9 +1530,9 @@ Examples:
                        help='RL algorithm')
     
     # Training parameters
-    parser.add_argument('--timesteps', type=int, default=1_000_000,
+    parser.add_argument('--timesteps', type=int, default=2_000_000,  # OPTIMIZED: 2x from 1M (high-end hardware)
                        help='Total training timesteps (standard mode)')
-    parser.add_argument('--n-envs', type=int, default=4,
+    parser.add_argument('--n-envs', type=int, default=12,  # OPTIMIZED: 3x from 4 (i7-14700K has 20 cores)
                        help='Number of parallel environments')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                        help='Learning rate')
