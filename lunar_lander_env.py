@@ -30,7 +30,27 @@ from common_utils import setup_basilisk_path, suppress_basilisk_warnings, quater
 # Add Basilisk to path
 setup_basilisk_path()
 
-from Basilisk.utilities import macros
+# Import Basilisk with proper error handling
+try:
+    from Basilisk.utilities import macros
+    from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
+except ImportError as e:
+    import os
+    basiliskPath = os.path.join(os.path.dirname(__file__), 'basilisk', 'dist3')
+    raise RuntimeError(
+        f"\n{'='*70}\n"
+        f"BASILISK IMPORT ERROR\n"
+        f"{'='*70}\n"
+        f"Failed to import Basilisk modules: {e}\n\n"
+        f"Expected location: {basiliskPath}\n\n"
+        f"Troubleshooting:\n"
+        f"  1. Ensure Basilisk is built in ./basilisk/dist3/\n"
+        f"  2. Check that build_basilisk.bat completed successfully\n"
+        f"  3. Verify Python version matches Basilisk build (Python 3.x)\n"
+        f"  4. Try rebuilding: cd basilisk && python setup.py build\n\n"
+        f"For more help, see: basilisk/README.md\n"
+        f"{'='*70}\n"
+    ) from e
 
 # Import Starship HLS configuration constants
 import starship_constants as SC
@@ -724,6 +744,7 @@ class LunarLanderEnv(gym.Env):
         This provides spatial awareness while keeping observation space compact
         
         OPTIMIZED: Vectorized implementation for 3x performance improvement
+        PRODUCTION FIX: Added input validation to prevent dimension mismatches
         
         Args:
             point_cloud: (N, 3) array of 3D points in body frame
@@ -735,6 +756,15 @@ class LunarLanderEnv(gym.Env):
         # 8 bins covering 360 degrees: 45 degrees per bin
         # Bin 0: North (337.5-22.5°), Bin 1: NE (22.5-67.5°), etc.
         azimuthal_ranges = np.full(8, 999.0, dtype=np.float32)  # Initialize with large values
+        
+        # PRODUCTION FIX: Validate inputs before processing
+        if point_cloud is None or ranges is None:
+            return azimuthal_ranges
+        
+        if len(ranges) == 0 or point_cloud.shape[0] != len(ranges):
+            if self.verbose > 0:
+                print(f"⚠ LIDAR dimension mismatch: point_cloud={point_cloud.shape}, ranges={ranges.shape}")
+            return azimuthal_ranges
         
         valid_mask = ranges > 0
         if not np.any(valid_mask):
@@ -992,6 +1022,7 @@ class LunarLanderEnv(gym.Env):
         Check if episode should terminate
         
         UPDATED: Expanded success window to 0-5m altitude (more realistic)
+        PRODUCTION: Added timeout logging for debugging
         
         Returns:
             terminated (bool): Episode ended due to success/failure
@@ -1041,6 +1072,15 @@ class LunarLanderEnv(gym.Env):
         # Truncation: Time limit reached
         if self.current_step >= self.max_episode_steps:
             truncated = True
+            # PRODUCTION FIX: Log timeout details for debugging
+            if hasattr(self, 'verbose') and self.verbose > 0:
+                print(f"\n⚠ Episode timeout at step {self.current_step}/{self.max_episode_steps}")
+                print(f"  Altitude: {altitude:.1f}m (terrain-relative)")
+                print(f"  Vertical velocity: {vertical_vel:.1f} m/s")
+                print(f"  Horizontal speed: {horizontal_speed:.1f} m/s")
+                print(f"  Fuel remaining: {obs_dict['fuel_fraction']*100:.1f}%")
+                print(f"  Attitude error: {np.degrees(attitude_error):.1f}°")
+                print(f"  Horizontal distance: {horizontal_distance:.1f}m")
         
         return terminated, truncated
     
@@ -1154,18 +1194,6 @@ class LunarLanderEnv(gym.Env):
             #    - Target position/velocity (static reference)
             # ============================================================
             
-            # PERFORMANCE OPTIMIZATION: Call InitializeSimulation() FIRST to clear integrator caches.
-            # This is necessary because Basilisk caches integrator state, and setState() alone doesn't
-            # invalidate those caches. We MUST call this BEFORE setState() so our new values don't get
-            # overwritten by the initialization.
-            #
-            # While this adds overhead (~2ms), it's MUCH faster than create_new_sim_on_reset=True
-            # (which takes ~20ms) and ensures observations reflect the new states.
-            self.scSim.InitializeSimulation()
-            
-            # Reset simulation time to 0 AFTER InitializeSimulation but BEFORE setState
-            self.scSim.TotalSim.CurrentNanos = 0
-            
             # Get individual state objects from the dynamics manager
             # Each state object must be retrieved separately using the hub's nameOfHub* properties
             posRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubPosition)
@@ -1189,6 +1217,14 @@ class LunarLanderEnv(gym.Env):
             
             ch4MassRef.setState(np.array([ch4InitMass]))
             loxMassRef.setState(np.array([loxInitMass]))
+            
+            # Reset simulation time to 0 AFTER setState
+            self.scSim.TotalSim.CurrentNanos = 0
+            
+            # PRODUCTION FIX: Call InitializeSimulation AFTER setState to ensure integrator
+            # caches are invalidated with the new state values already in place.
+            # This ensures the first observation reflects the new episode's initial conditions.
+            self.scSim.InitializeSimulation()
             
             # Note: Fuel tank internal properties (fuelMass, tankRadius, r_TcT_T) are 
             # managed automatically by the FuelTank effector when we update the state.
@@ -1345,6 +1381,7 @@ class LunarLanderEnv(gym.Env):
         Basilisk simulation objects accumulate in memory (~50-100MB per env).
         
         This method explicitly deletes all major objects and forces garbage collection.
+        PRODUCTION: Enhanced with cached array cleanup for better memory management.
         """
         if self.scSim is not None:
             # Delete Basilisk simulation objects in dependency order
@@ -1411,6 +1448,25 @@ class LunarLanderEnv(gym.Env):
             
             # Mark as uninitialized
             self.scenario_initialized = False
+            
+            # PRODUCTION FIX: Delete cached arrays to free memory
+            if hasattr(self, 'rcs_moment_arms'):
+                del self.rcs_moment_arms
+            if hasattr(self, 'midbody_positions_B'):
+                del self.midbody_positions_B
+            if hasattr(self, 'midbody_directions_B'):
+                del self.midbody_directions_B
+            if hasattr(self, 'rcs_positions_B'):
+                del self.rcs_positions_B
+            if hasattr(self, 'rcs_directions_B'):
+                del self.rcs_directions_B
+            
+            # Clear observation and reward caches
+            if hasattr(self, '_last_reward_components'):
+                self._last_reward_components.clear()
+            
+            # Clear action history
+            self.prev_action = None
             
             # Force garbage collection to immediately free memory
             # This is critical in parallel training where Python's default GC

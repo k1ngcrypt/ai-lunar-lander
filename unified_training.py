@@ -366,6 +366,25 @@ class UnifiedTrainer:
                         with open(path, 'r') as f:
                             state = json.load(f)
                     
+                    # PRODUCTION FIX: Validate loaded state
+                    required_keys = ['stage_idx', 'stage_attempts', 'timestamp']
+                    if not all(k in state for k in required_keys):
+                        print(f"⚠ Warning: Incomplete training state in {path}")
+                        print(f"  Missing keys: {[k for k in required_keys if k not in state]}")
+                        print(f"  Ignoring saved state and starting fresh")
+                        return None
+                    
+                    # Validate stage index is within valid range
+                    if state['stage_idx'] >= len(self.curriculum_stages):
+                        print(f"⚠ Warning: Invalid stage_idx {state['stage_idx']} in {path}")
+                        print(f"  Valid range: 0-{len(self.curriculum_stages)-1}")
+                        print(f"  Resetting to stage 0")
+                        state['stage_idx'] = 0
+                    
+                    if state['stage_idx'] < 0:
+                        print(f"⚠ Warning: Negative stage_idx {state['stage_idx']}, resetting to 0")
+                        state['stage_idx'] = 0
+                    
                     if self.verbose > 0:
                         print(f"✓ Training state loaded from: {path}")
                         print(f"  Stage: {state.get('stage_idx', 0) + 1}")
@@ -1076,13 +1095,24 @@ class UnifiedTrainer:
             
             # Check advancement criteria
             reward_passed = mean_reward >= stage.success_threshold
-            success_passed = success_rate >= 0.6  # 60% success rate required
+            
+            # PRODUCTION FIX: Stage-specific success rate thresholds
+            # Early stages need lower thresholds to allow exploration
+            SUCCESS_RATE_THRESHOLDS = {
+                0: 0.40,  # Stage 1: 40% (learning basics)
+                1: 0.50,  # Stage 2: 50%
+                2: 0.55,  # Stage 3: 55%
+                3: 0.60,  # Stage 4: 60%
+                4: 0.65   # Stage 5: 65% (final mastery)
+            }
+            required_success_rate = SUCCESS_RATE_THRESHOLDS.get(stage_idx, 0.60)
+            success_passed = success_rate >= required_success_rate
             
             print(f"\n{'='*60}")
             print(f"STAGE {stage_idx + 1} COMPLETION REPORT")
             print(f"{'='*60}")
             print(f"Mean reward:     {mean_reward:.2f} / {stage.success_threshold:.2f} {'✓' if reward_passed else '✗'}")
-            print(f"Success rate:    {success_rate*100:.1f}% / 60.0% {'✓' if success_passed else '✗'}")
+            print(f"Success rate:    {success_rate*100:.1f}% / {required_success_rate*100:.0f}% {'✓' if success_passed else '✗'}")
             print(f"Overall:         {'PASSED' if (reward_passed and success_passed) else 'FAILED'}")
             print(f"{'='*60}\n")
             
@@ -1199,6 +1229,16 @@ class UnifiedTrainer:
                 # Continue updating statistics (don't freeze them)
                 env.training = True
                 env.norm_reward = True
+                
+                # PRODUCTION FIX: Validate statistics loaded correctly
+                if not hasattr(env, 'obs_rms') or env.obs_rms is None:
+                    raise ValueError("VecNormalize obs_rms not properly initialized")
+                if not hasattr(env, 'ret_rms') or env.ret_rms is None:
+                    raise ValueError("VecNormalize ret_rms not properly initialized")
+                
+                # Show first 5 dimensions of mean for verification
+                mean_sample = env.obs_rms.mean[:min(5, len(env.obs_rms.mean))]
+                print(f"  ✓ Loaded obs mean (first 5): {mean_sample}")
                 print("  ✓ VecNormalize stats loaded successfully")
             except Exception as e:
                 print(f"  ⚠ Failed to load VecNormalize stats: {e}")
