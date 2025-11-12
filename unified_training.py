@@ -1581,7 +1581,13 @@ Examples:
     
     # Execute based on mode
     if args.mode == 'test':
-        trainer.test_setup()
+        # Use the standalone environment test script for better separation of concerns
+        print("\n" + "="*80)
+        print("NOTE: Test mode now uses test_environment.py for better separation")
+        print("="*80 + "\n")
+        import test_environment
+        success = test_environment.test_environment_setup(verbose=args.verbose, seed=args.seed)
+        return 0 if success else 1
     
     elif args.mode == 'demo':
         trainer.demo_training()
