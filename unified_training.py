@@ -57,6 +57,9 @@ import argparse
 import numpy as np
 from typing import Optional, Dict, List, Tuple
 import time
+import json
+import pickle
+from datetime import datetime
 
 # Stable Baselines3 imports
 from stable_baselines3 import PPO, SAC, TD3
@@ -201,6 +204,57 @@ class RewardStatisticsCallback(BaseCallback):
                     self.reward_components[comp_name] = self.reward_components[comp_name][-200:]
 
 
+class TrainingStateCallback(BaseCallback):
+    """
+    Callback to periodically save training state (curriculum stage, timesteps, etc.)
+    This enables resuming curriculum training from interruptions.
+    """
+    
+    def __init__(self, 
+                 state_path: str,
+                 save_freq: int = 10000,
+                 stage_name: str = "",
+                 stage_idx: int = 0,
+                 verbose: int = 0):
+        super().__init__(verbose)
+        self.state_path = state_path
+        self.save_freq = save_freq
+        self.stage_name = stage_name
+        self.stage_idx = stage_idx
+        self.total_timesteps = 0
+        
+    def _on_step(self) -> bool:
+        self.total_timesteps += 1
+        
+        # Save state periodically
+        if self.total_timesteps % self.save_freq == 0:
+            self._save_state()
+        
+        return True
+    
+    def _save_state(self):
+        """Save current training state to disk"""
+        state = {
+            'stage_idx': self.stage_idx,
+            'stage_name': self.stage_name,
+            'total_timesteps': self.total_timesteps,
+            'num_timesteps': self.model.num_timesteps,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+        try:
+            with open(self.state_path, 'w') as f:
+                json.dump(state, f, indent=2)
+            if self.verbose > 0:
+                print(f"Training state saved: {self.state_path}")
+        except Exception as e:
+            print(f"Warning: Failed to save training state: {e}")
+    
+    def on_training_end(self) -> None:
+        """Save final state when training ends"""
+        self._save_state()
+
+
 # ============================================================================
 # TRAINING MODES
 # ============================================================================
@@ -246,9 +300,115 @@ class UnifiedTrainer:
         # Curriculum stages
         self.curriculum_stages = self._create_curriculum()
         
+        # Training state (for resume functionality)
+        self.training_state_path = os.path.join(save_dir, 'training_state.json')
+        self.curriculum_state_path = os.path.join(save_dir, 'curriculum_state.pkl')
+        
         # Print initialization info
         if self.verbose > 0:
             self._print_header()
+    
+    def _save_training_state(self, 
+                            stage_idx: int = 0,
+                            stage_attempts: Dict[int, int] = None,
+                            additional_info: Dict = None):
+        """
+        Save complete training state for resuming curriculum training.
+        
+        Args:
+            stage_idx: Current curriculum stage index
+            stage_attempts: Dictionary of stage_idx -> number of attempts
+            additional_info: Any additional metadata to save
+        """
+        state = {
+            'algorithm': self.algorithm,
+            'n_envs': self.n_envs,
+            'seed': self.seed,
+            'stage_idx': stage_idx,
+            'stage_attempts': stage_attempts or {},
+            'timestamp': datetime.now().isoformat(),
+            'current_vecnormalize_path': self.current_vecnormalize_path,
+        }
+        
+        if additional_info:
+            state.update(additional_info)
+        
+        try:
+            # Save as JSON for human readability
+            with open(self.training_state_path, 'w') as f:
+                json.dump(state, f, indent=2)
+            
+            # Also save as pickle with full state (in case JSON doesn't capture everything)
+            with open(self.curriculum_state_path, 'wb') as f:
+                pickle.dump(state, f)
+            
+            if self.verbose > 0:
+                print(f"✓ Training state saved: {self.training_state_path}")
+        
+        except Exception as e:
+            print(f"⚠ Warning: Failed to save training state: {e}")
+    
+    def _load_training_state(self) -> Optional[Dict]:
+        """
+        Load training state for resuming curriculum training.
+        
+        Returns:
+            Dictionary with training state, or None if not found
+        """
+        # Try pickle first (most complete), then JSON
+        for path in [self.curriculum_state_path, self.training_state_path]:
+            if os.path.exists(path):
+                try:
+                    if path.endswith('.pkl'):
+                        with open(path, 'rb') as f:
+                            state = pickle.load(f)
+                    else:
+                        with open(path, 'r') as f:
+                            state = json.load(f)
+                    
+                    if self.verbose > 0:
+                        print(f"✓ Training state loaded from: {path}")
+                        print(f"  Stage: {state.get('stage_idx', 0) + 1}")
+                        print(f"  Timestamp: {state.get('timestamp', 'unknown')}")
+                    
+                    return state
+                
+                except Exception as e:
+                    print(f"⚠ Warning: Failed to load training state from {path}: {e}")
+        
+        return None
+    
+    def _get_latest_checkpoint(self, stage_name: str = None) -> Optional[str]:
+        """
+        Find the latest checkpoint for resuming training.
+        
+        Args:
+            stage_name: Optional stage name to find stage-specific checkpoint
+        
+        Returns:
+            Path to latest checkpoint, or None if not found
+        """
+        if stage_name:
+            checkpoint_dir = os.path.join(self.save_dir, f'{stage_name}_checkpoints')
+        else:
+            checkpoint_dir = os.path.join(self.save_dir, 'checkpoints')
+        
+        if not os.path.exists(checkpoint_dir):
+            return None
+        
+        # Find all checkpoint files
+        checkpoints = []
+        for filename in os.listdir(checkpoint_dir):
+            if filename.endswith('.zip'):
+                filepath = os.path.join(checkpoint_dir, filename)
+                checkpoints.append((filepath, os.path.getmtime(filepath)))
+        
+        if not checkpoints:
+            return None
+        
+        # Return most recent checkpoint
+        latest = max(checkpoints, key=lambda x: x[1])
+        return latest[0]
     
     def _print_header(self):
         """Print initialization header"""
@@ -685,6 +845,8 @@ class UnifiedTrainer:
         print(f"Total timesteps: {total_timesteps:,}")
         print(f"Parallel environments: {self.n_envs}")
         print(f"Learning rate: {learning_rate}")
+        if resume_path:
+            print(f"Resuming from: {resume_path}")
         print("="*80 + "\n")
         
         # Create environments
@@ -694,7 +856,21 @@ class UnifiedTrainer:
             env = DummyVecEnv([self._make_env()])
         
         # ISSUE #3 FIX: Add observation normalization
-        env = self._normalize_env(env, training=True)
+        # If resuming, try to load previous VecNormalize stats
+        vecnormalize_path = os.path.join(self.save_dir, 'checkpoints', 'vecnormalize.pkl')
+        if resume_path and os.path.exists(vecnormalize_path):
+            print(f"Loading VecNormalize stats from: {vecnormalize_path}")
+            try:
+                env = VecNormalize.load(vecnormalize_path, env)
+                env.training = True
+                env.norm_reward = True
+                print("✓ VecNormalize stats loaded successfully")
+            except Exception as e:
+                print(f"⚠ Failed to load VecNormalize: {e}")
+                print("  Creating fresh VecNormalize wrapper")
+                env = self._normalize_env(env, training=True)
+        else:
+            env = self._normalize_env(env, training=True)
         
         eval_env = DummyVecEnv([self._make_env(rank=self.n_envs)])
         eval_env = self._normalize_env(eval_env, training=False)  # Eval: obs normalization only
@@ -709,6 +885,11 @@ class UnifiedTrainer:
             elif self.algorithm == 'td3':
                 self.model = TD3.load(resume_path, env=env)
             print("✓ Model loaded successfully")
+            
+            # Reset num_timesteps if continuing training (not reset_num_timesteps)
+            initial_timesteps = self.model.num_timesteps
+            print(f"  Model has {initial_timesteps:,} timesteps")
+            print(f"  Will train for {total_timesteps:,} additional timesteps")
         else:
             print("Creating new model...")
             self.model = self._create_model(env, learning_rate=learning_rate)
@@ -751,7 +932,8 @@ class UnifiedTrainer:
                 total_timesteps=total_timesteps,
                 callback=callback,
                 log_interval=10,
-                progress_bar=True
+                progress_bar=True,
+                reset_num_timesteps=False  # Keep timestep count when resuming
             )
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user!")
@@ -760,6 +942,10 @@ class UnifiedTrainer:
         final_path = os.path.join(self.save_dir, f'{self.algorithm}_final')
         self.model.save(final_path)
         print(f"\n✓ Final model saved to: {final_path}")
+        
+        # Save VecNormalize stats
+        env.save(vecnormalize_path)
+        print(f"✓ VecNormalize stats saved: {vecnormalize_path}")
         
         env.close()
         eval_env.close()
@@ -771,6 +957,8 @@ class UnifiedTrainer:
         print(f"  tensorboard --logdir={self.log_dir}")
         print(f"\nTo evaluate the model:")
         print(f"  python unified_training.py --mode eval --model-path {final_path}")
+        print(f"\nTo resume training:")
+        print(f"  python unified_training.py --mode standard --resume {final_path} --timesteps <additional_steps>")
         print("="*80 + "\n")
         
         return self.model
@@ -779,18 +967,68 @@ class UnifiedTrainer:
     # MODE: CURRICULUM
     # ========================================================================
     
-    def curriculum_training(self, start_stage: int = 0, auto_advance: bool = True):
+    def curriculum_training(self, start_stage: int = 0, auto_advance: bool = True, resume: bool = False):
         """
         Full curriculum learning through all stages with IMPROVED advancement logic:
         - Requires both mean reward threshold AND 60% success rate
         - Implements stage regression if performance drops
         - Validates mastery before advancing
+        - Supports resuming from saved state
+        
+        Args:
+            start_stage: Starting stage index (0-based)
+            auto_advance: Automatically advance stages based on performance
+            resume: Try to resume from saved training state
         """
         print("\n" + "="*80)
         print("CURRICULUM LEARNING MODE (IMPROVED)")
         print("="*80)
         print(f"Total stages: {len(self.curriculum_stages)}")
-        print(f"Starting at stage: {start_stage + 1}")
+        
+        # Try to load saved state if resume is requested
+        stage_idx = start_stage
+        stage_attempts = {}
+        
+        if resume:
+            print("\nAttempting to resume from saved state...")
+            saved_state = self._load_training_state()
+            
+            if saved_state:
+                stage_idx = saved_state.get('stage_idx', start_stage)
+                stage_attempts = saved_state.get('stage_attempts', {})
+                # Convert string keys back to int (JSON doesn't support int keys)
+                stage_attempts = {int(k): v for k, v in stage_attempts.items()}
+                
+                # Restore VecNormalize path
+                if saved_state.get('current_vecnormalize_path'):
+                    self.current_vecnormalize_path = saved_state['current_vecnormalize_path']
+                
+                print(f"✓ Resuming from Stage {stage_idx + 1}")
+                print(f"  Stage attempts so far: {stage_attempts}")
+                
+                # Try to load the model from latest checkpoint
+                stage_name = self.curriculum_stages[stage_idx].name
+                checkpoint_path = self._get_latest_checkpoint(stage_name)
+                
+                if checkpoint_path:
+                    print(f"  Loading model from: {checkpoint_path}")
+                    try:
+                        if self.algorithm == 'ppo':
+                            self.model = PPO.load(checkpoint_path)
+                        elif self.algorithm == 'sac':
+                            self.model = SAC.load(checkpoint_path)
+                        elif self.algorithm == 'td3':
+                            self.model = TD3.load(checkpoint_path)
+                        print(f"  ✓ Model loaded with {self.model.num_timesteps:,} timesteps")
+                    except Exception as e:
+                        print(f"  ⚠ Failed to load checkpoint: {e}")
+                        print("  Will start fresh for this stage")
+                else:
+                    print(f"  No checkpoint found for {stage_name}, starting fresh")
+            else:
+                print("  No saved state found, starting from scratch")
+        
+        print(f"Starting at stage: {stage_idx + 1}")
         print(f"Auto-advance: {auto_advance}")
         print("\nADVANCEMENT CRITERIA:")
         print("  - Mean reward > threshold")
@@ -798,12 +1036,10 @@ class UnifiedTrainer:
         print("  - Stage regression enabled for poor performance")
         print("\nStages:")
         for i, stage in enumerate(self.curriculum_stages):
-            print(f"  {i+1}. {stage.name}: {stage.description}")
+            marker = "➜" if i == stage_idx else " "
+            print(f" {marker}{i+1}. {stage.name}: {stage.description}")
             print(f"      Threshold: {stage.success_threshold}, Max steps: {stage.max_timesteps}")
         print("="*80 + "\n")
-        
-        stage_idx = start_stage
-        stage_attempts = {}  # Track attempts per stage
         
         while stage_idx < len(self.curriculum_stages):
             stage = self.curriculum_stages[stage_idx]
@@ -813,12 +1049,30 @@ class UnifiedTrainer:
                 stage_attempts[stage_idx] = 0
             stage_attempts[stage_idx] += 1
             
+            # Save state before starting stage
+            self._save_training_state(
+                stage_idx=stage_idx,
+                stage_attempts=stage_attempts,
+                additional_info={'mode': 'curriculum'}
+            )
+            
             print(f"\n{'='*80}")
             print(f"STAGE {stage_idx + 1}/{len(self.curriculum_stages)}: {stage.name.upper()}")
             print(f"Attempt #{stage_attempts[stage_idx]}")
             print(f"{'='*80}")
             
             mean_reward, success_rate = self._train_stage(stage, n_envs=self.n_envs)
+            
+            # Save state after stage completion
+            self._save_training_state(
+                stage_idx=stage_idx,
+                stage_attempts=stage_attempts,
+                additional_info={
+                    'mode': 'curriculum',
+                    'last_stage_reward': mean_reward,
+                    'last_stage_success_rate': success_rate
+                }
+            )
             
             # Check advancement criteria
             reward_passed = mean_reward >= stage.success_threshold
@@ -896,6 +1150,13 @@ class UnifiedTrainer:
         final_path = os.path.join(self.save_dir, 'curriculum_final')
         self.model.save(final_path)
         
+        # Save final state
+        self._save_training_state(
+            stage_idx=len(self.curriculum_stages),  # Completed all stages
+            stage_attempts=stage_attempts,
+            additional_info={'mode': 'curriculum', 'status': 'completed'}
+        )
+        
         print("\n" + "="*80)
         print("CURRICULUM TRAINING COMPLETE!")
         print("="*80)
@@ -906,6 +1167,8 @@ class UnifiedTrainer:
             stage_name = self.curriculum_stages[idx].name
             print(f"  Stage {idx+1} ({stage_name}): {attempts} attempt(s)")
         print(f"\nView training: tensorboard --logdir={self.log_dir}")
+        print(f"\nTo resume if interrupted:")
+        print(f"  python unified_training.py --mode curriculum --resume")
         print("="*80 + "\n")
         
         return self.model
@@ -1210,6 +1473,9 @@ Examples:
   
   # Resume training
   python unified_training.py --mode standard --resume ./models/checkpoints/ppo_lunar_lander_500000_steps
+  
+  # Resume curriculum training
+  python unified_training.py --mode curriculum --resume
         """
     )
     
@@ -1236,6 +1502,8 @@ Examples:
                        help='Starting stage for curriculum (0-based)')
     parser.add_argument('--no-auto-advance', action='store_true',
                        help='Disable automatic stage advancement')
+    parser.add_argument('--resume-curriculum', action='store_true',
+                       help='Resume curriculum training from saved state')
     
     # Paths
     parser.add_argument('--save-dir', type=str, default='./models',
@@ -1288,7 +1556,8 @@ Examples:
     elif args.mode == 'curriculum':
         trainer.curriculum_training(
             start_stage=args.start_stage,
-            auto_advance=not args.no_auto_advance
+            auto_advance=not args.no_auto_advance,
+            resume=args.resume is not None or args.resume_curriculum
         )
     
     elif args.mode == 'eval':

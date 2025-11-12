@@ -133,7 +133,10 @@ python unified_training.py --mode curriculum --n-envs 4
 python unified_training.py --mode standard --timesteps 1000000
 
 # Resume training from checkpoint
-python unified_training.py --mode standard --resume ./models/checkpoints/ppo_lunar_lander_500000_steps
+python unified_training.py --mode standard --resume ./models/checkpoints/ppo_lunar_lander_500000_steps --timesteps 500000
+
+# Resume curriculum training (automatic state restoration)
+python unified_training.py --mode curriculum --resume-curriculum
 
 # Evaluate model
 python unified_training.py --mode eval --model-path ./models/best_model/best_model --eval-episodes 20
@@ -141,6 +144,56 @@ python unified_training.py --mode eval --model-path ./models/best_model/best_mod
 # Evaluate with visualization
 python unified_training.py --mode eval --model-path ./models/best_model/best_model --render
 ```
+
+---
+
+## 💾 Save & Resume Training
+
+The training system includes comprehensive save/resume functionality:
+
+### Automatic Checkpointing
+- **Every 50,000 timesteps**: Model + VecNormalize stats saved
+- **Curriculum state**: Stage progress, attempts, and performance tracked
+- **Best model**: Automatically saved based on evaluation performance
+
+### Resume Training
+```bash
+# Standard training - resume from checkpoint
+python unified_training.py --mode standard \
+    --resume ./models/checkpoints/ppo_lunar_lander_500000_steps \
+    --timesteps 500000  # Additional timesteps to train
+
+# Curriculum training - automatic state restoration
+python unified_training.py --mode curriculum --resume-curriculum
+```
+
+### What Gets Saved
+```
+models/
+├── training_state.json           # Training progress (human-readable)
+├── curriculum_state.pkl          # Complete state (binary)
+├── checkpoints/                  # Regular checkpoints
+│   ├── ppo_lunar_lander_50000_steps.zip
+│   └── vecnormalize.pkl          # Normalization statistics
+├── stage*_checkpoints/           # Per-stage checkpoints (curriculum)
+├── stage*_vecnormalize.pkl       # Per-stage normalization
+└── best_model/                   # Best performing model
+    └── best_model.zip
+```
+
+### Recovery from Interruptions
+```bash
+# Gracefully stop training (saves state)
+# Press Ctrl+C during training
+
+# Resume automatically (curriculum mode)
+python unified_training.py --mode curriculum --resume-curriculum
+
+# Or manually specify checkpoint (standard mode)
+python unified_training.py --mode standard --resume ./models/checkpoints/ppo_lunar_lander_450000_steps
+```
+
+📖 **For detailed save/resume documentation, see [SAVE_RESUME_GUIDE.md](SAVE_RESUME_GUIDE.md)**
 
 ---
 
@@ -278,6 +331,7 @@ Each episode's info dict includes `reward_components` with detailed breakdown of
 
 ## 📚 Documentation
 
+- **[SAVE_RESUME_GUIDE.md](SAVE_RESUME_GUIDE.md)** - 💾 Complete save/resume training guide
 - **[UNIFIED_TRAINING_GUIDE.md](UNIFIED_TRAINING_GUIDE.md)** - Complete training guide with all options
 - **[REWARD_SYSTEM_GUIDE.md](REWARD_SYSTEM_GUIDE.md)** - 🎁 Comprehensive reward system documentation with tuning guide
 - **[SB3_QUICKSTART.md](SB3_QUICKSTART.md)** - Quick reference for algorithms and parameters
