@@ -21,36 +21,17 @@ NOTE: All Starship HLS configuration constants are imported from starship_consta
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+
 import sys
 import os
-
 # Import common utilities
-from common_utils import setup_basilisk_path, suppress_basilisk_warnings, quaternion_to_euler
+from common_utils import setup_basilisk_path, quaternion_to_euler
+
 
 # Add Basilisk to path
 setup_basilisk_path()
-
-# Import Basilisk with proper error handling
-try:
-    from Basilisk.utilities import macros
-    from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
-except ImportError as e:
-    import os
-    basiliskPath = os.path.join(os.path.dirname(__file__), 'basilisk', 'dist3')
-    raise RuntimeError(
-        f"\n{'='*70}\n"
-        f"BASILISK IMPORT ERROR\n"
-        f"{'='*70}\n"
-        f"Failed to import Basilisk modules: {e}\n\n"
-        f"Expected location: {basiliskPath}\n\n"
-        f"Troubleshooting:\n"
-        f"  1. Ensure Basilisk is built in ./basilisk/dist3/\n"
-        f"  2. Check that build_basilisk.bat completed successfully\n"
-        f"  3. Verify Python version matches Basilisk build (Python 3.x)\n"
-        f"  4. Try rebuilding: cd basilisk && python setup.py build\n\n"
-        f"For more help, see: basilisk/README.md\n"
-        f"{'='*70}\n"
-    ) from e
+from Basilisk.utilities import macros
+from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
 
 # Import Starship HLS configuration constants
 import starship_constants as SC
@@ -629,15 +610,10 @@ class LunarLanderEnv(gym.Env):
         )
         
         # Initialize simulation (ONLY CALL THIS ONCE!)
-        # Suppress expected Basilisk warnings during initialization
-        with suppress_basilisk_warnings():
-            self.scSim.InitializeSimulation()
-        
+        self.scSim.InitializeSimulation()
         # Run a tiny warm-up step to ensure all messages are initialized
-        # This prevents "IMUSensorMsgPayload not properly initialized" warning
-        with suppress_basilisk_warnings():
-            self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
-            self.scSim.ExecuteSimulation()
+        self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
+        self.scSim.ExecuteSimulation()
         
         self.scenario_initialized = True
         
@@ -1395,10 +1371,10 @@ class LunarLanderEnv(gym.Env):
         """Render environment (optional)"""
         if self.render_mode == 'human':
             # Could implement matplotlib visualization
-            pass
+            return None
         elif self.render_mode == 'rgb_array':
             # Could return RGB array for video recording
-            pass
+            return None
         return None
     
     def close(self):
@@ -1415,69 +1391,54 @@ class LunarLanderEnv(gym.Env):
         if self.scSim is not None:
             # Delete Basilisk simulation objects in dependency order
             # (sensors first, then effectors, then spacecraft, then simulation)
-            
             # Delete sensor objects
             if hasattr(self, 'aiSensors') and self.aiSensors is not None:
                 del self.aiSensors
                 self.aiSensors = None
-            
             if hasattr(self, 'imu') and self.imu is not None:
                 del self.imu
                 self.imu = None
-            
             if hasattr(self, 'lidar') and self.lidar is not None:
                 del self.lidar
                 self.lidar = None
-            
             # Delete controller (holds references to effectors)
             if hasattr(self, 'thrController') and self.thrController is not None:
                 del self.thrController
                 self.thrController = None
-            
             # Delete thruster effectors
             if hasattr(self, 'primaryEff') and self.primaryEff is not None:
                 del self.primaryEff
                 self.primaryEff = None
-            
             if hasattr(self, 'midbodyEff') and self.midbodyEff is not None:
                 del self.midbodyEff
                 self.midbodyEff = None
-            
             if hasattr(self, 'rcsEff') and self.rcsEff is not None:
                 del self.rcsEff
                 self.rcsEff = None
-            
             # Delete fuel tanks
             if hasattr(self, 'ch4Tank') and self.ch4Tank is not None:
                 del self.ch4Tank
                 self.ch4Tank = None
-            
             if hasattr(self, 'loxTank') and self.loxTank is not None:
                 del self.loxTank
                 self.loxTank = None
-            
             # Delete terrain force effector
             if hasattr(self, 'terrainForceEff') and self.terrainForceEff is not None:
                 del self.terrainForceEff
                 self.terrainForceEff = None
-            
             # Delete terrain model (large heightmap array)
             if hasattr(self, 'terrain') and self.terrain is not None:
                 del self.terrain
                 self.terrain = None
-            
             # Delete spacecraft
             if hasattr(self, 'lander') and self.lander is not None:
                 del self.lander
                 self.lander = None
-            
             # Delete simulation base
             del self.scSim
             self.scSim = None
-            
             # Mark as uninitialized
             self.scenario_initialized = False
-            
             # Delete cached arrays to free memory
             if hasattr(self, 'rcs_moment_arms'):
                 del self.rcs_moment_arms
@@ -1489,17 +1450,12 @@ class LunarLanderEnv(gym.Env):
                 del self.rcs_positions_B
             if hasattr(self, 'rcs_directions_B'):
                 del self.rcs_directions_B
-            
             # Clear observation and reward caches
             if hasattr(self, '_last_reward_components'):
                 self._last_reward_components.clear()
-            
             # Clear action history
             self.prev_action = None
-            
             # Force garbage collection to immediately free memory
-            # This is critical in parallel training where Python's default GC
-            # may not run frequently enough
             import gc
             gc.collect()
 
@@ -1527,7 +1483,6 @@ if __name__ == "__main__":
     for i in range(5):
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
-        
         print(f"\nStep {i+1}:")
         print(f"  Action shape: {action.shape}")
         print(f"  Primary throttles: [{action[0]:.2f}, {action[1]:.2f}, {action[2]:.2f}]")
@@ -1536,9 +1491,7 @@ if __name__ == "__main__":
         print(f"  Altitude: {info['altitude']:.2f} m")
         print(f"  Fuel: {info['fuel_fraction']*100:.1f}%")
         print(f"  Terminated: {terminated}, Truncated: {truncated}")
-        
         if terminated or truncated:
             print("Episode ended!")
             break
-    
     print("\nEnvironment test complete!")
