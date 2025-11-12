@@ -27,13 +27,12 @@ NOTE: This script runs a standalone demo. For RL training, use lunar_lander_env.
 which wraps these components in a Gymnasium interface.
 """
 
-import sys
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 
 # Import common utilities
-from common_utils import setup_basilisk_path, mrp_to_dcm, mrp_to_quaternion, quaternion_multiply, quaternion_conjugate
+from common_utils import setup_basilisk_path, mrp_to_dcm, mrp_to_quaternion
 
 # Import terrain simulation module
 from terrain_simulation import LunarRegolithModel

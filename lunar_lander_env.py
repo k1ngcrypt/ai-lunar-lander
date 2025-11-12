@@ -21,36 +21,15 @@ NOTE: All Starship HLS configuration constants are imported from starship_consta
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-import sys
-import os
 
+import os
 # Import common utilities
-from common_utils import setup_basilisk_path, suppress_basilisk_warnings, quaternion_to_euler
+from common_utils import setup_basilisk_path, quaternion_to_euler
+
 
 # Add Basilisk to path
 setup_basilisk_path()
-
-# Import Basilisk with proper error handling
-try:
-    from Basilisk.utilities import macros
-    from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
-except ImportError as e:
-    import os
-    basiliskPath = os.path.join(os.path.dirname(__file__), 'basilisk', 'dist3')
-    raise RuntimeError(
-        f"\n{'='*70}\n"
-        f"BASILISK IMPORT ERROR\n"
-        f"{'='*70}\n"
-        f"Failed to import Basilisk modules: {e}\n\n"
-        f"Expected location: {basiliskPath}\n\n"
-        f"Troubleshooting:\n"
-        f"  1. Ensure Basilisk is built in ./basilisk/dist3/\n"
-        f"  2. Check that build_basilisk.bat completed successfully\n"
-        f"  3. Verify Python version matches Basilisk build (Python 3.x)\n"
-        f"  4. Try rebuilding: cd basilisk && python setup.py build\n\n"
-        f"For more help, see: basilisk/README.md\n"
-        f"{'='*70}\n"
-    ) from e
+from Basilisk.utilities import macros
 
 # Import Starship HLS configuration constants
 import starship_constants as SC
@@ -89,11 +68,13 @@ class LunarLanderEnv(gym.Env):
         Action smoothing: 80% old action + 20% new action (exponential moving average filter)
     
     Reward Function:
-        Rebalanced design (fixes Issues #1-2):
-        - Terminal rewards: ±500 (5x larger) - success +500, precision +200, fuel +100
-        - Shaping rewards: Scaled to 0.1x for gentle gradient (exponential altitude penalty)
+        Comprehensive multi-component architecture:
+        - Terminal rewards: ±1000 (10x larger than shaping) - success +1000, precision +200, fuel efficiency +150
+        - Progress tracking: 0-5 per step for continuous guidance (descent profile, approach angle, proximity)
+        - Safety penalties: ±2 per step for danger zone warnings and efficiency
+        - Control quality: ±1 per step for smooth, efficient control
         - Fuel efficiency bonus: ONLY on successful landing (prevents hoarding)
-        - Success window: 0-5m altitude, velocity < 3 m/s, attitude < 15°
+        - Success window: 0-5m altitude, velocity < 3 m/s, horizontal < 2 m/s, attitude < 15°
     
     Reset Optimization:
         Uses Basilisk state engine for direct state updates (eliminates warnings, 100x faster)
@@ -106,8 +87,8 @@ class LunarLanderEnv(gym.Env):
                  render_mode=None,
                  max_episode_steps=1000,
                  observation_mode='compact',  # 'compact' or 'full'
-                 initial_altitude_range=(1000.0, 2000.0),
-                 initial_velocity_range=(-50.0, 50.0),
+                 initial_altitude_range=(18000.0, 22000.0),
+                 initial_velocity_range=((-200.0, 200.0), (-200.0, 200.0), (-100.0, -50.0)),
                  terrain_config=None,
                  create_new_sim_on_reset=False):
         """
@@ -117,8 +98,9 @@ class LunarLanderEnv(gym.Env):
             render_mode: 'human' or 'rgb_array' or None
             max_episode_steps: Maximum steps per episode
             observation_mode: 'compact' (32D) or 'full' (200+ D)
-            initial_altitude_range: (min, max) initial altitude in meters
-            initial_velocity_range: (min, max) initial velocity magnitude
+            initial_altitude_range: (min, max) initial altitude in meters above terrain
+            initial_velocity_range: Tuple of 3 ranges (vx, vy, vz) in m/s for suborbital trajectory
+                                    Default simulates descent from ~20km with ~200 m/s horizontal speed
             terrain_config: Dict with terrain generation parameters
             create_new_sim_on_reset: If True, recreate simulation each reset (slow but clean).
                                      If False, reuse simulation (fast)
@@ -626,15 +608,10 @@ class LunarLanderEnv(gym.Env):
         )
         
         # Initialize simulation (ONLY CALL THIS ONCE!)
-        # Suppress expected Basilisk warnings during initialization
-        with suppress_basilisk_warnings():
-            self.scSim.InitializeSimulation()
-        
+        self.scSim.InitializeSimulation()
         # Run a tiny warm-up step to ensure all messages are initialized
-        # This prevents "IMUSensorMsgPayload not properly initialized" warning
-        with suppress_basilisk_warnings():
-            self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
-            self.scSim.ExecuteSimulation()
+        self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
+        self.scSim.ExecuteSimulation()
         
         self.scenario_initialized = True
         
@@ -700,7 +677,7 @@ class LunarLanderEnv(gym.Env):
                 obs_dict['imu_gyro_current']  # IMU gyro (3)
             ], dtype=np.float32)
             
-            # ISSUE #3 FIX: Validate observation space size to catch edge cases early
+            # Validate observation space size to catch edge cases early
             # This prevents rare crashes when LIDAR or other sensors return unexpected sizes
             if obs.shape[0] != 32:
                 # Emergency fallback: if observation size is wrong, log details and pad/truncate
@@ -744,7 +721,7 @@ class LunarLanderEnv(gym.Env):
         This provides spatial awareness while keeping observation space compact
         
         OPTIMIZED: Vectorized implementation for 3x performance improvement
-        PRODUCTION FIX: Added input validation to prevent dimension mismatches
+        Includes input validation to prevent dimension mismatches
         
         Args:
             point_cloud: (N, 3) array of 3D points in body frame
@@ -757,13 +734,12 @@ class LunarLanderEnv(gym.Env):
         # Bin 0: North (337.5-22.5°), Bin 1: NE (22.5-67.5°), etc.
         azimuthal_ranges = np.full(8, 999.0, dtype=np.float32)  # Initialize with large values
         
-        # PRODUCTION FIX: Validate inputs before processing
+        # Validate inputs before processing
         if point_cloud is None or ranges is None:
             return azimuthal_ranges
         
         if len(ranges) == 0 or point_cloud.shape[0] != len(ranges):
-            if self.verbose > 0:
-                print(f"⚠ LIDAR dimension mismatch: point_cloud={point_cloud.shape}, ranges={ranges.shape}")
+            print(f"⚠ LIDAR dimension mismatch: point_cloud={point_cloud.shape}, ranges={ranges.shape}")
             return azimuthal_ranges
         
         valid_mask = ranges > 0
@@ -1015,7 +991,8 @@ class LunarLanderEnv(gym.Env):
         # Store reward components for debugging
         self._last_reward_components = reward_components
         
-        return reward
+        # Ensure reward is a Python float (not numpy scalar) for Gymnasium compatibility
+        return float(reward)
     
     def _check_termination(self, obs_dict):
         """
@@ -1072,15 +1049,6 @@ class LunarLanderEnv(gym.Env):
         # Truncation: Time limit reached
         if self.current_step >= self.max_episode_steps:
             truncated = True
-            # PRODUCTION FIX: Log timeout details for debugging
-            if hasattr(self, 'verbose') and self.verbose > 0:
-                print(f"\n⚠ Episode timeout at step {self.current_step}/{self.max_episode_steps}")
-                print(f"  Altitude: {altitude:.1f}m (terrain-relative)")
-                print(f"  Vertical velocity: {vertical_vel:.1f} m/s")
-                print(f"  Horizontal speed: {horizontal_speed:.1f} m/s")
-                print(f"  Fuel remaining: {obs_dict['fuel_fraction']*100:.1f}%")
-                print(f"  Attitude error: {np.degrees(attitude_error):.1f}°")
-                print(f"  Horizontal distance: {horizontal_distance:.1f}m")
         
         return terminated, truncated
     
@@ -1111,10 +1079,24 @@ class LunarLanderEnv(gym.Env):
         # Reset reward tracking (prevents reward component leakage)
         self._last_reward_components = {}
         
+        # ============================================================
+        # TERRAIN RANDOMIZATION (Critical for generalization)
+        # ============================================================
+        # Regenerate terrain for each episode to ensure agent learns to land
+        # on a variety of terrains. Uses Gymnasium's RNG for reproducibility.
+        # This prevents overfitting to a single terrain configuration.
+        terrain_seed = self.np_random.integers(0, 2**31 - 1)
+        self.terrain.rng = np.random.RandomState(terrain_seed)
+        self.terrain.generate_procedural_terrain(
+            num_craters=self.terrain_config['num_craters'],
+            crater_depth_range=self.terrain_config['crater_depth_range'],
+            crater_radius_range=self.terrain_config['crater_radius_range']
+        )
+        
         # Randomize initial conditions using Gymnasium's RNG (set by super().reset(seed=seed))
         # NOTE: Using self.np_random instead of np.random ensures proper seeding behavior
         
-        # Random altitude
+        # Random altitude (20km suborbital trajectory)
         altitude = self.np_random.uniform(*self.initial_altitude_range)
         
         # Random horizontal position (near target)
@@ -1125,12 +1107,21 @@ class LunarLanderEnv(gym.Env):
         terrain_height = self.terrain.get_height(x, y)
         z = terrain_height + altitude
         
-        # Random initial velocity
-        vel_mag = self.np_random.uniform(*self.initial_velocity_range)
-        vel_direction = self.np_random.standard_normal(3)
-        vel_direction[2] = -abs(vel_direction[2])  # Ensure descending
-        vel_direction = vel_direction / np.linalg.norm(vel_direction)
-        velocity = vel_direction * abs(vel_mag)
+        # Suborbital trajectory velocity (realistic for lunar descent from 20km)
+        # Horizontal velocity dominates, with downward component
+        if isinstance(self.initial_velocity_range[0], tuple):
+            # New format: separate ranges for vx, vy, vz
+            vx = self.np_random.uniform(*self.initial_velocity_range[0])
+            vy = self.np_random.uniform(*self.initial_velocity_range[1])
+            vz = self.np_random.uniform(*self.initial_velocity_range[2])
+            velocity = np.array([vx, vy, vz])
+        else:
+            # Legacy format: single magnitude (for backward compatibility)
+            vel_mag = self.np_random.uniform(*self.initial_velocity_range)
+            vel_direction = self.np_random.standard_normal(3)
+            vel_direction[2] = -abs(vel_direction[2])  # Ensure descending
+            vel_direction = vel_direction / np.linalg.norm(vel_direction)
+            velocity = vel_direction * abs(vel_mag)
         
         # Small random attitude perturbation
         attitude_mrp = self.np_random.standard_normal(3) * 0.1
@@ -1186,8 +1177,11 @@ class LunarLanderEnv(gym.Env):
             #    ✓ Thruster commands reset via message passing
             #    ✓ Terrain forces reset to zero
             #
+            # 5. TERRAIN STATE:
+            #    ✓ Terrain regenerated with new random seed (prevents overfitting)
+            #    ✓ New crater positions, depths, and surface roughness per episode
+            #
             # What is NOT reset (and doesn't need to be):
-            #    - Terrain model (static, shared across episodes)
             #    - Thruster configuration (static)
             #    - Sensor configuration (static)
             #    - RCS moment arms (static, pre-computed)
@@ -1221,7 +1215,7 @@ class LunarLanderEnv(gym.Env):
             # Reset simulation time to 0 AFTER setState
             self.scSim.TotalSim.CurrentNanos = 0
             
-            # PRODUCTION FIX: Call InitializeSimulation AFTER setState to ensure integrator
+            # Call InitializeSimulation AFTER setState to ensure integrator
             # caches are invalidated with the new state values already in place.
             # This ensures the first observation reflects the new episode's initial conditions.
             self.scSim.InitializeSimulation()
@@ -1366,10 +1360,10 @@ class LunarLanderEnv(gym.Env):
         """Render environment (optional)"""
         if self.render_mode == 'human':
             # Could implement matplotlib visualization
-            pass
+            return None
         elif self.render_mode == 'rgb_array':
             # Could return RGB array for video recording
-            pass
+            return None
         return None
     
     def close(self):
@@ -1386,70 +1380,55 @@ class LunarLanderEnv(gym.Env):
         if self.scSim is not None:
             # Delete Basilisk simulation objects in dependency order
             # (sensors first, then effectors, then spacecraft, then simulation)
-            
             # Delete sensor objects
             if hasattr(self, 'aiSensors') and self.aiSensors is not None:
                 del self.aiSensors
                 self.aiSensors = None
-            
             if hasattr(self, 'imu') and self.imu is not None:
                 del self.imu
                 self.imu = None
-            
             if hasattr(self, 'lidar') and self.lidar is not None:
                 del self.lidar
                 self.lidar = None
-            
             # Delete controller (holds references to effectors)
             if hasattr(self, 'thrController') and self.thrController is not None:
                 del self.thrController
                 self.thrController = None
-            
             # Delete thruster effectors
             if hasattr(self, 'primaryEff') and self.primaryEff is not None:
                 del self.primaryEff
                 self.primaryEff = None
-            
             if hasattr(self, 'midbodyEff') and self.midbodyEff is not None:
                 del self.midbodyEff
                 self.midbodyEff = None
-            
             if hasattr(self, 'rcsEff') and self.rcsEff is not None:
                 del self.rcsEff
                 self.rcsEff = None
-            
             # Delete fuel tanks
             if hasattr(self, 'ch4Tank') and self.ch4Tank is not None:
                 del self.ch4Tank
                 self.ch4Tank = None
-            
             if hasattr(self, 'loxTank') and self.loxTank is not None:
                 del self.loxTank
                 self.loxTank = None
-            
             # Delete terrain force effector
             if hasattr(self, 'terrainForceEff') and self.terrainForceEff is not None:
                 del self.terrainForceEff
                 self.terrainForceEff = None
-            
             # Delete terrain model (large heightmap array)
             if hasattr(self, 'terrain') and self.terrain is not None:
                 del self.terrain
                 self.terrain = None
-            
             # Delete spacecraft
             if hasattr(self, 'lander') and self.lander is not None:
                 del self.lander
                 self.lander = None
-            
             # Delete simulation base
             del self.scSim
             self.scSim = None
-            
             # Mark as uninitialized
             self.scenario_initialized = False
-            
-            # PRODUCTION FIX: Delete cached arrays to free memory
+            # Delete cached arrays to free memory
             if hasattr(self, 'rcs_moment_arms'):
                 del self.rcs_moment_arms
             if hasattr(self, 'midbody_positions_B'):
@@ -1460,17 +1439,12 @@ class LunarLanderEnv(gym.Env):
                 del self.rcs_positions_B
             if hasattr(self, 'rcs_directions_B'):
                 del self.rcs_directions_B
-            
             # Clear observation and reward caches
             if hasattr(self, '_last_reward_components'):
                 self._last_reward_components.clear()
-            
             # Clear action history
             self.prev_action = None
-            
             # Force garbage collection to immediately free memory
-            # This is critical in parallel training where Python's default GC
-            # may not run frequently enough
             import gc
             gc.collect()
 
@@ -1498,7 +1472,6 @@ if __name__ == "__main__":
     for i in range(5):
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
-        
         print(f"\nStep {i+1}:")
         print(f"  Action shape: {action.shape}")
         print(f"  Primary throttles: [{action[0]:.2f}, {action[1]:.2f}, {action[2]:.2f}]")
@@ -1507,9 +1480,7 @@ if __name__ == "__main__":
         print(f"  Altitude: {info['altitude']:.2f} m")
         print(f"  Fuel: {info['fuel_fraction']*100:.1f}%")
         print(f"  Terminated: {terminated}, Truncated: {truncated}")
-        
         if terminated or truncated:
             print("Episode ended!")
             break
-    
     print("\nEnvironment test complete!")

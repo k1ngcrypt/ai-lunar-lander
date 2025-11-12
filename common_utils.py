@@ -174,35 +174,3 @@ def quaternion_to_euler(quat):
     yaw = np.arctan2(siny_cosp, cosy_cosp)
     
     return np.array([roll, pitch, yaw], dtype=np.float32)
-
-
-# ============================================================================
-# CONTEXT MANAGERS
-# ============================================================================
-
-import contextlib
-import io
-
-
-@contextlib.contextmanager
-def suppress_basilisk_warnings():
-    """
-    Temporarily redirect stderr to suppress Basilisk warnings.
-    
-    Basilisk prints warnings directly to stderr (not through Python's warning system),
-    so we need to temporarily redirect stderr to suppress them during initialization.
-    
-    These warnings are harmless - they occur when Basilisk's state engine registers
-    properties during initialization, which is expected behavior.
-    
-    Usage:
-        with suppress_basilisk_warnings():
-            # Code that produces Basilisk warnings
-            scSim.InitializeSimulation()
-    """
-    old_stderr = sys.stderr
-    sys.stderr = io.StringIO()
-    try:
-        yield
-    finally:
-        sys.stderr = old_stderr

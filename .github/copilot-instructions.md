@@ -54,9 +54,6 @@ pip install stable-baselines3[extra] gymnasium numpy matplotlib tensorboard
 
 ### Training Commands (Primary Workflow)
 ```powershell
-# 0. VERIFY GPU SETUP (run this first!)
-python check_gpu_setup.py
-
 # 1. Test setup (2 min sanity check)
 python unified_training.py --mode test
 
@@ -66,7 +63,7 @@ python unified_training.py --mode curriculum --n-envs 12
 # 3. Monitor via TensorBoard (separate terminal)
 tensorboard --logdir=./logs
 
-# 4. Monitor GPU usage (separate terminal)
+# 4. Monitor GPU usage (separate terminal - if using GPU)
 nvidia-smi -l 1
 
 # 5. Evaluate trained model
@@ -233,9 +230,6 @@ Reference: SB3 docs for algorithm-specific params
 - ✅ **Curriculum timesteps**: 2x increase per stage (200k-800k)
 - ✅ **Checkpoint frequency**: 100k steps (reduced I/O)
 - **Combined speedup**: 10-20x faster training
-
-**Verify GPU setup:** `python check_gpu_setup.py`
-**Full documentation:** See `HARDWARE_OPTIMIZATIONS.md`
 
 ## When Asking Questions
 1. **For training issues**: Include TensorBoard metrics (`rollout/ep_rew_mean` trend) and command used
