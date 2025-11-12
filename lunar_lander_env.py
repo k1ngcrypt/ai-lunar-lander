@@ -22,7 +22,6 @@ import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
 
-import sys
 import os
 # Import common utilities
 from common_utils import setup_basilisk_path, quaternion_to_euler
@@ -31,7 +30,6 @@ from common_utils import setup_basilisk_path, quaternion_to_euler
 # Add Basilisk to path
 setup_basilisk_path()
 from Basilisk.utilities import macros
-from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
 
 # Import Starship HLS configuration constants
 import starship_constants as SC
@@ -741,8 +739,7 @@ class LunarLanderEnv(gym.Env):
             return azimuthal_ranges
         
         if len(ranges) == 0 or point_cloud.shape[0] != len(ranges):
-            if self.verbose > 0:
-                print(f"⚠ LIDAR dimension mismatch: point_cloud={point_cloud.shape}, ranges={ranges.shape}")
+            print(f"⚠ LIDAR dimension mismatch: point_cloud={point_cloud.shape}, ranges={ranges.shape}")
             return azimuthal_ranges
         
         valid_mask = ranges > 0
@@ -994,7 +991,8 @@ class LunarLanderEnv(gym.Env):
         # Store reward components for debugging
         self._last_reward_components = reward_components
         
-        return reward
+        # Ensure reward is a Python float (not numpy scalar) for Gymnasium compatibility
+        return float(reward)
     
     def _check_termination(self, obs_dict):
         """
@@ -1051,15 +1049,6 @@ class LunarLanderEnv(gym.Env):
         # Truncation: Time limit reached
         if self.current_step >= self.max_episode_steps:
             truncated = True
-            # Log timeout details for debugging when verbose mode is enabled
-            if hasattr(self, 'verbose') and self.verbose > 0:
-                print(f"\n⚠ Episode timeout at step {self.current_step}/{self.max_episode_steps}")
-                print(f"  Altitude: {altitude:.1f}m (terrain-relative)")
-                print(f"  Vertical velocity: {vertical_vel:.1f} m/s")
-                print(f"  Horizontal speed: {horizontal_speed:.1f} m/s")
-                print(f"  Fuel remaining: {obs_dict['fuel_fraction']*100:.1f}%")
-                print(f"  Attitude error: {np.degrees(attitude_error):.1f}°")
-                print(f"  Horizontal distance: {horizontal_distance:.1f}m")
         
         return terminated, truncated
     
