@@ -561,7 +561,7 @@ class UnifiedTrainer:
                 'observation_mode': 'compact',
                 'max_episode_steps': 600,
                 'initial_altitude_range': (50.0, 100.0),
-                'initial_velocity_range': (-5.0, 5.0),
+                'initial_velocity_range': ((-5.0, 5.0), (-5.0, 5.0), (-5.0, -2.0)),
                 'terrain_config': {
                     'size': 1000.0,
                     'resolution': 100,
@@ -583,7 +583,7 @@ class UnifiedTrainer:
                 'observation_mode': 'compact',
                 'max_episode_steps': 800,
                 'initial_altitude_range': (100.0, 300.0),
-                'initial_velocity_range': (-10.0, 10.0),
+                'initial_velocity_range': ((-15.0, 15.0), (-15.0, 15.0), (-15.0, -5.0)),
                 'terrain_config': {
                     'size': 1500.0,
                     'resolution': 150,
@@ -605,7 +605,7 @@ class UnifiedTrainer:
                 'observation_mode': 'compact',
                 'max_episode_steps': 1000,
                 'initial_altitude_range': (300.0, 800.0),  # Overlaps with stage 2
-                'initial_velocity_range': (-20.0, 20.0),
+                'initial_velocity_range': ((-30.0, 30.0), (-30.0, 30.0), (-30.0, -10.0)),
                 'terrain_config': {
                     'size': 2000.0,
                     'resolution': 200,
@@ -627,7 +627,7 @@ class UnifiedTrainer:
                 'observation_mode': 'compact',
                 'max_episode_steps': 1200,
                 'initial_altitude_range': (500.0, 1500.0),  # Wide range
-                'initial_velocity_range': (-30.0, 30.0),
+                'initial_velocity_range': ((-50.0, 50.0), (-50.0, 50.0), (-40.0, -20.0)),
                 'terrain_config': {
                     'size': 2000.0,
                     'resolution': 200,
@@ -648,8 +648,8 @@ class UnifiedTrainer:
             env_config={
                 'observation_mode': 'compact',
                 'max_episode_steps': 1500,
-                'initial_altitude_range': (500.0, 2000.0),
-                'initial_velocity_range': (-50.0, 50.0),
+                'initial_altitude_range': (18000.0, 22000.0),  # Suborbital trajectory from ~20km
+                'initial_velocity_range': ((-200.0, 200.0), (-200.0, 200.0), (-100.0, -50.0)),  # Realistic suborbital velocities
                 'terrain_config': {
                     'size': 2500.0,
                     'resolution': 250,
@@ -764,7 +764,7 @@ class UnifiedTrainer:
                     'observation_mode': 'compact',
                     'max_episode_steps': 300,
                     'initial_altitude_range': (100.0, 150.0),
-                    'initial_velocity_range': (-2.0, 2.0),
+                    'initial_velocity_range': ((-5.0, 5.0), (-5.0, 5.0), (-5.0, -2.0)),
                     'terrain_config': {
                         'size': 1000.0, 'resolution': 100,
                         'num_craters': 0, 'crater_depth_range': (0, 0),
@@ -782,7 +782,7 @@ class UnifiedTrainer:
                     'observation_mode': 'compact',
                     'max_episode_steps': 500,
                     'initial_altitude_range': (200.0, 400.0),
-                    'initial_velocity_range': (-10.0, 10.0),
+                    'initial_velocity_range': ((-15.0, 15.0), (-15.0, 15.0), (-15.0, -5.0)),
                     'terrain_config': {
                         'size': 1500.0, 'resolution': 150,
                         'num_craters': 3, 'crater_depth_range': (1, 3),
@@ -800,7 +800,7 @@ class UnifiedTrainer:
                     'observation_mode': 'compact',
                     'max_episode_steps': 800,
                     'initial_altitude_range': (400.0, 800.0),
-                    'initial_velocity_range': (-20.0, 20.0),
+                    'initial_velocity_range': ((-30.0, 30.0), (-30.0, 30.0), (-30.0, -10.0)),
                     'terrain_config': {
                         'size': 2000.0, 'resolution': 200,
                         'num_craters': 8, 'crater_depth_range': (2, 6),

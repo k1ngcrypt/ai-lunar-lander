@@ -108,8 +108,8 @@ class LunarLanderEnv(gym.Env):
                  render_mode=None,
                  max_episode_steps=1000,
                  observation_mode='compact',  # 'compact' or 'full'
-                 initial_altitude_range=(1000.0, 2000.0),
-                 initial_velocity_range=(-50.0, 50.0),
+                 initial_altitude_range=(18000.0, 22000.0),
+                 initial_velocity_range=((-200.0, 200.0), (-200.0, 200.0), (-100.0, -50.0)),
                  terrain_config=None,
                  create_new_sim_on_reset=False):
         """
@@ -119,8 +119,9 @@ class LunarLanderEnv(gym.Env):
             render_mode: 'human' or 'rgb_array' or None
             max_episode_steps: Maximum steps per episode
             observation_mode: 'compact' (32D) or 'full' (200+ D)
-            initial_altitude_range: (min, max) initial altitude in meters
-            initial_velocity_range: (min, max) initial velocity magnitude
+            initial_altitude_range: (min, max) initial altitude in meters above terrain
+            initial_velocity_range: Tuple of 3 ranges (vx, vy, vz) in m/s for suborbital trajectory
+                                    Default simulates descent from ~20km with ~200 m/s horizontal speed
             terrain_config: Dict with terrain generation parameters
             create_new_sim_on_reset: If True, recreate simulation each reset (slow but clean).
                                      If False, reuse simulation (fast)
@@ -1130,7 +1131,7 @@ class LunarLanderEnv(gym.Env):
         # Randomize initial conditions using Gymnasium's RNG (set by super().reset(seed=seed))
         # NOTE: Using self.np_random instead of np.random ensures proper seeding behavior
         
-        # Random altitude
+        # Random altitude (20km suborbital trajectory)
         altitude = self.np_random.uniform(*self.initial_altitude_range)
         
         # Random horizontal position (near target)
@@ -1141,12 +1142,21 @@ class LunarLanderEnv(gym.Env):
         terrain_height = self.terrain.get_height(x, y)
         z = terrain_height + altitude
         
-        # Random initial velocity
-        vel_mag = self.np_random.uniform(*self.initial_velocity_range)
-        vel_direction = self.np_random.standard_normal(3)
-        vel_direction[2] = -abs(vel_direction[2])  # Ensure descending
-        vel_direction = vel_direction / np.linalg.norm(vel_direction)
-        velocity = vel_direction * abs(vel_mag)
+        # Suborbital trajectory velocity (realistic for lunar descent from 20km)
+        # Horizontal velocity dominates, with downward component
+        if isinstance(self.initial_velocity_range[0], tuple):
+            # New format: separate ranges for vx, vy, vz
+            vx = self.np_random.uniform(*self.initial_velocity_range[0])
+            vy = self.np_random.uniform(*self.initial_velocity_range[1])
+            vz = self.np_random.uniform(*self.initial_velocity_range[2])
+            velocity = np.array([vx, vy, vz])
+        else:
+            # Legacy format: single magnitude (for backward compatibility)
+            vel_mag = self.np_random.uniform(*self.initial_velocity_range)
+            vel_direction = self.np_random.standard_normal(3)
+            vel_direction[2] = -abs(vel_direction[2])  # Ensure descending
+            vel_direction = vel_direction / np.linalg.norm(vel_direction)
+            velocity = vel_direction * abs(vel_mag)
         
         # Small random attitude perturbation
         attitude_mrp = self.np_random.standard_normal(3) * 0.1
