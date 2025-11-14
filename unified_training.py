@@ -60,6 +60,8 @@ import time
 import json
 import pickle
 from datetime import datetime
+import multiprocessing
+import warnings
 
 # Stable Baselines3 imports
 from stable_baselines3 import PPO, SAC, TD3
@@ -71,9 +73,51 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 from stable_baselines3.common.env_checker import check_env
 import gymnasium as gym
+import torch
 
 # Custom environment
 from lunar_lander_env import LunarLanderEnv
+
+
+# ============================================================================
+# STANDALONE ENVIRONMENT FACTORY (for multiprocessing)
+# ============================================================================
+
+def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
+    """
+    Standalone environment factory for SubprocVecEnv.
+    Must be at module level (not a class method) to be picklable.
+    
+    Args:
+        env_config: Environment configuration dict
+        seed: Random seed base
+        rank: Environment index for seed offset
+    
+    Returns:
+        Callable that creates a LunarLanderEnv
+    """
+    # Deep copy config to avoid shared mutable state
+    import copy
+    config = copy.deepcopy(env_config) if env_config else {
+        'observation_mode': 'compact',
+        'max_episode_steps': 1000
+    }
+    
+    def _init():
+        # Import inside subprocess
+        from common_utils import setup_basilisk_path
+        setup_basilisk_path()
+        from lunar_lander_env import LunarLanderEnv
+        
+        # CRITICAL FIX: The state engine approach has a fundamental bug where setState()
+        # doesn't properly update the integrator's cached initial conditions.
+        # We must delay simulation creation until the first reset() call.
+        config['delay_sim_creation'] = True
+        env = LunarLanderEnv(**config)
+        env.reset(seed=seed + rank)
+        return env
+    
+    return _init
 
 
 # ============================================================================
@@ -264,7 +308,7 @@ class UnifiedTrainer:
     
     def __init__(self,
                  algorithm: str = 'ppo',
-                 n_envs: int = 12,  # OPTIMIZED: Increased from 4 to 12 for i7-14700K (20 cores)
+                 n_envs: int = 12,  # Parallel SubprocVecEnv with standalone factory function
                  save_dir: str = './models',
                  log_dir: str = './logs',
                  seed: int = 42,
@@ -307,6 +351,7 @@ class UnifiedTrainer:
         # Print initialization info
         if self.verbose > 0:
             self._print_header()
+            self._check_gpu_availability()
     
     def _save_training_state(self, 
                             stage_idx: int = 0,
@@ -332,6 +377,24 @@ class UnifiedTrainer:
         
         if additional_info:
             state.update(additional_info)
+        
+        # Convert numpy types to native Python types for JSON serialization
+        def convert_numpy(obj):
+            """Recursively convert numpy types to native Python types"""
+            import numpy as np
+            if isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [convert_numpy(item) for item in obj]
+            return obj
+        
+        state = convert_numpy(state)
         
         try:
             # Save as JSON for human readability
@@ -441,19 +504,37 @@ class UnifiedTrainer:
         print(f"Random seed: {self.seed}")
         print("="*80 + "\n")
     
+    def _check_gpu_availability(self):
+        """Check GPU availability and warn if CUDA not available"""
+        print("="*80)
+        print("GPU STATUS CHECK")
+        print("="*80)
+        print(f"PyTorch version: {torch.__version__}")
+        print(f"CUDA available: {torch.cuda.is_available()}")
+        
+        if torch.cuda.is_available():
+            print(f"CUDA version: {torch.version.cuda}")
+            print(f"GPU count: {torch.cuda.device_count()}")
+            for i in range(torch.cuda.device_count()):
+                print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
+            print("✓ GPU acceleration ENABLED")
+        else:
+            print("\n⚠ WARNING: CUDA NOT AVAILABLE - Training will use CPU only!")
+            print("This will be 10-20x slower than GPU training.")
+            print("\nTo enable GPU acceleration:")
+            print("  1. Install CUDA-enabled PyTorch:")
+            print("     pip uninstall torch torchvision torchaudio")
+            print("     pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121")
+            print("  2. Ensure NVIDIA GPU drivers are installed")
+            print("  3. Verify CUDA toolkit is installed (nvcc --version)")
+            print("\nContinuing with CPU training in 5 seconds...")
+            import time
+            time.sleep(5)
+        print("="*80 + "\n")
+    
     def _make_env(self, env_config: Dict = None, rank: int = 0):
-        """Create environment factory"""
-        def _init():
-            config = env_config or {
-                'observation_mode': 'compact',
-                'max_episode_steps': 1000
-            }
-            # Add flag to improve performance during reset
-            config['create_new_sim_on_reset'] = False
-            env = LunarLanderEnv(**config)
-            env.reset(seed=self.seed + rank)
-            return env
-        return _init
+        """Create environment factory - delegates to standalone function for picklability"""
+        return make_lunar_env(env_config, self.seed, rank)
     
     def _normalize_env(self, env, training: bool = True):
         """
@@ -470,9 +551,9 @@ class UnifiedTrainer:
         return VecNormalize(
             env,
             norm_obs=True,           # Normalize observations to zero mean, unit variance
-            norm_reward=training,    # Normalize rewards during training only
+            norm_reward=False,       # DISABLED: Reward normalization corrupts learning signal
             clip_obs=10.0,           # Clip normalized observations to [-10, 10]
-            clip_reward=10.0,        # Clip normalized rewards to [-10, 10]
+            clip_reward=10.0,        # Not used when norm_reward=False, but keep for safety
             gamma=0.99,              # Discount factor for reward normalization
             epsilon=1e-8             # Small value to avoid division by zero
         )
@@ -868,9 +949,18 @@ class UnifiedTrainer:
             print(f"Resuming from: {resume_path}")
         print("="*80 + "\n")
         
-        # Create environments
+        # Create environments with subprocess safety
         if self.n_envs > 1:
-            env = SubprocVecEnv([self._make_env(rank=i) for i in range(self.n_envs)])
+            print(f"Creating {self.n_envs} parallel environments...")
+            try:
+                env = SubprocVecEnv(
+                    [make_lunar_env(None, self.seed, i) for i in range(self.n_envs)],
+                    start_method='spawn'
+                )
+                print("✓ Parallel environments created successfully")
+            except Exception as e:
+                print(f"⚠ Parallel creation failed: {e}, using sequential mode")
+                env = DummyVecEnv([self._make_env(rank=i) for i in range(self.n_envs)])
         else:
             env = DummyVecEnv([self._make_env()])
         
@@ -1213,7 +1303,19 @@ class UnifiedTrainer:
         """
         # Create environments for this stage
         if n_envs > 1:
-            env = SubprocVecEnv([self._make_env(stage.env_config, i) for i in range(n_envs)])
+            print(f"  Creating {n_envs} parallel environments for stage '{stage.name}'...")
+            try:
+                # Try SubprocVecEnv for true parallelism (10x faster)
+                env = SubprocVecEnv(
+                    [make_lunar_env(stage.env_config, self.seed, i) for i in range(n_envs)],
+                    start_method='spawn'
+                )
+                print(f"  ✓ Parallel environments created successfully")
+            except Exception as e:
+                # Fallback to DummyVecEnv if pickling fails
+                print(f"  ⚠ Parallel environment creation failed: {e}")
+                print(f"  Falling back to sequential mode (DummyVecEnv)")
+                env = DummyVecEnv([self._make_env(stage.env_config, i) for i in range(n_envs)])
         else:
             env = DummyVecEnv([self._make_env(stage.env_config)])
         
@@ -1248,9 +1350,28 @@ class UnifiedTrainer:
             # First stage or no previous stats - create fresh
             env = self._normalize_env(env, training=True)
         
-        # Create eval environment (observation normalization only, no reward normalization)
+        # Create eval environment (must share same VecNormalize stats for consistent observations)
         eval_env = DummyVecEnv([self._make_env(stage.env_config, n_envs)])
-        eval_env = self._normalize_env(eval_env, training=False)
+        
+        # Share VecNormalize stats with training env (critical for consistent evaluation)
+        # Set training=False to freeze stats updates, norm_reward=False to get raw rewards
+        if isinstance(env, VecNormalize):
+            # Clone the training env's VecNormalize wrapper for eval
+            eval_env = VecNormalize(
+                eval_env,
+                training=False,        # Don't update stats during eval
+                norm_obs=True,         # Use same obs normalization
+                norm_reward=False,     # Don't normalize rewards (we want raw values)
+                clip_obs=10.0,
+                clip_reward=10.0,
+                gamma=0.99
+            )
+            # Copy the running statistics from training env
+            eval_env.obs_rms = env.obs_rms
+            eval_env.ret_rms = env.ret_rms
+        else:
+            # Fallback if env is not VecNormalized (shouldn't happen)
+            eval_env = self._normalize_env(eval_env, training=False)
         
         # Create or update model
         if self.model is None:
@@ -1300,6 +1421,32 @@ class UnifiedTrainer:
             )
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user!")
+        except EOFError as e:
+            print(f"\n\n{'='*60}")
+            print("ERROR: Subprocess pipe broken (multiprocessing failure)")
+            print(f"{'='*60}")
+            print("This typically occurs when:")
+            print("  1. Child process crashed during environment reset/step")
+            print("  2. Basilisk simulation diverged in a subprocess")
+            print("  3. Windows multiprocessing incompatibility")
+            print("\nRecommended solutions:")
+            print("  1. Reduce parallel environments: --n-envs 2 or --n-envs 1")
+            print("  2. The system will attempt to recover with DummyVecEnv...")
+            print(f"{'='*60}\n")
+            raise
+        except BrokenPipeError as e:
+            print(f"\n\n{'='*60}")
+            print("ERROR: Subprocess communication failed")
+            print(f"{'='*60}")
+            print("Subprocess crashed during training. This is usually due to:")
+            print("  1. Basilisk memory issues in parallel environments")
+            print("  2. CUDA out-of-memory in GPU accelerated training")
+            print("  3. Simulation divergence causing NaN values")
+            print("\nRecommended solutions:")
+            print("  1. Use single environment: --n-envs 1")
+            print("  2. Reduce batch size if using GPU")
+            print(f"{'='*60}\n")
+            raise
         
         # Save stage model
         stage_path = os.path.join(self.save_dir, f'{stage.name}_final')
@@ -1476,8 +1623,11 @@ class UnifiedTrainer:
                 episode_reward += reward
             
             episode_rewards.append(episode_reward)
-            # Success if reward > 50 (indicates successful landing per new reward design)
-            successes.append(episode_reward > 50.0)
+            # Success detection: Check if episode terminated successfully
+            # Since we're getting raw rewards now (norm_reward=False), check for success indicator
+            # Success landings should have rewards > 600 (base 1000 success - some penalties)
+            is_success = episode_reward > 600.0
+            successes.append(is_success)
         
         mean_reward = np.mean(episode_rewards)
         std_reward = np.std(episode_rewards)
@@ -1532,7 +1682,7 @@ Examples:
     # Training parameters
     parser.add_argument('--timesteps', type=int, default=2_000_000,  # OPTIMIZED: 2x from 1M (high-end hardware)
                        help='Total training timesteps (standard mode)')
-    parser.add_argument('--n-envs', type=int, default=12,  # OPTIMIZED: 3x from 4 (i7-14700K has 20 cores)
+    parser.add_argument('--n-envs', type=int, default=12,  # Fixed: Now uses true parallel SubprocVecEnv
                        help='Number of parallel environments')
     parser.add_argument('--learning-rate', type=float, default=3e-4,
                        help='Learning rate')
@@ -1613,4 +1763,10 @@ Examples:
 
 
 if __name__ == "__main__":
+    # CRITICAL: Windows multiprocessing requires 'spawn' method and __main__ guard
+    # This prevents subprocess re-import issues and memory corruption
+    if sys.platform == 'win32':
+        # Force spawn method on Windows (required for CUDA + multiprocessing)
+        multiprocessing.set_start_method('spawn', force=True)
+    
     main()

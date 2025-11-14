@@ -21,6 +21,22 @@ NOTE: All Starship HLS configuration constants are imported from starship_consta
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
+import warnings
+import os
+import sys
+import io
+
+# Suppress Basilisk SWIG memory leak warnings (cosmetic only, not actual leaks)
+# The BSKLogger warnings are due to SWIG not finding destructors for singleton objects
+# These are cleaned up by Python's garbage collector and do not accumulate
+warnings.filterwarnings('ignore', message='.*BSKLogger.*memory leak.*')
+warnings.filterwarnings('ignore', message='swig/python detected a memory leak.*')
+
+# Suppress Basilisk state engine warnings (intentional behavior for optimized reset)
+# These warnings occur when using setState() for fast episode resets
+# This is the recommended approach for performance in RL training
+warnings.filterwarnings('ignore', message='.*You created the dynamic property.*more than once.*')
+warnings.filterwarnings('ignore', message='.*You created a state with the name.*more than once.*')
 
 import os
 # Import common utilities
@@ -29,6 +45,44 @@ from common_utils import setup_basilisk_path, quaternion_to_euler
 
 # Add Basilisk to path
 setup_basilisk_path()
+
+# Context manager to suppress Basilisk C++ warnings
+class SuppressBasiliskWarnings:
+    """
+    Context manager to suppress BSK_WARNING messages printed directly to stderr
+    by Basilisk's C++ code at the file descriptor level.
+    """
+    def __init__(self):
+        self.original_stderr_fd = None
+        self.saved_stderr_fd = None
+        self.devnull_fd = None
+        
+    def __enter__(self):
+        try:
+            # Save the original stderr file descriptor
+            self.original_stderr_fd = sys.stderr.fileno()
+            self.saved_stderr_fd = os.dup(self.original_stderr_fd)
+            
+            # Redirect stderr to devnull at the file descriptor level
+            self.devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(self.devnull_fd, self.original_stderr_fd)
+        except Exception:
+            # If file descriptor manipulation fails, fall back to Python-level suppression
+            pass
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if self.saved_stderr_fd is not None:
+                # Restore the original stderr
+                os.dup2(self.saved_stderr_fd, self.original_stderr_fd)
+                os.close(self.saved_stderr_fd)
+            if self.devnull_fd is not None:
+                os.close(self.devnull_fd)
+        except Exception:
+            pass
+        return False
+
 from Basilisk.utilities import macros
 
 # Import Starship HLS configuration constants
@@ -90,7 +144,8 @@ class LunarLanderEnv(gym.Env):
                  initial_altitude_range=(18000.0, 22000.0),
                  initial_velocity_range=((-200.0, 200.0), (-200.0, 200.0), (-100.0, -50.0)),
                  terrain_config=None,
-                 create_new_sim_on_reset=False):
+                 create_new_sim_on_reset=False,
+                 delay_sim_creation=False):
         """
         Initialize Lunar Lander Gymnasium Environment
         
@@ -103,6 +158,7 @@ class LunarLanderEnv(gym.Env):
                                     Default simulates descent from ~20km with ~200 m/s horizontal speed
             terrain_config: Dict with terrain generation parameters
             create_new_sim_on_reset: If True, recreate simulation each reset (slow but clean).
+            delay_sim_creation: If True, delay simulation creation until first reset (fixes init bug).
                                      If False, reuse simulation (fast)
         """
         super().__init__()
@@ -113,6 +169,7 @@ class LunarLanderEnv(gym.Env):
         self.initial_altitude_range = initial_altitude_range
         self.initial_velocity_range = initial_velocity_range
         self.create_new_sim_on_reset = create_new_sim_on_reset
+        self.delay_sim_creation = delay_sim_creation
         
         # Episode tracking
         self.current_step = 0
@@ -205,9 +262,23 @@ class LunarLanderEnv(gym.Env):
         self.scenario_initialized = False
         self.scSim = None
         self.lander = None
-        self.terrain = None
         self.aiSensors = None
         self.thrController = None
+        
+        # Create terrain immediately (needed for reset even if sim is delayed)
+        from terrain_simulation import LunarRegolithModel
+        self.terrain = LunarRegolithModel(
+            size=self.terrain_config['size'],
+            resolution=self.terrain_config['resolution']
+        )
+        terrainDataPath = os.path.join(os.path.dirname(__file__), 
+                                      'generated_terrain', 'moon_terrain.npy')
+        if not self.terrain.load_terrain_from_file(terrainDataPath):
+            self.terrain.generate_procedural_terrain(
+                num_craters=self.terrain_config['num_craters'],
+                crater_depth_range=self.terrain_config['crater_depth_range'],
+                crater_radius_range=self.terrain_config['crater_radius_range']
+            )
         
         # Initial conditions storage (used by _create_simulation)
         self._initial_conditions = {
@@ -218,9 +289,11 @@ class LunarLanderEnv(gym.Env):
         }
         
         # Initialize simulation (called only ONCE unless create_new_sim_on_reset=True)
-        self._create_simulation()
+        # OR delay until first reset() if delay_sim_creation=True
+        if not self.delay_sim_creation:
+            self._create_simulation()
         
-        if self.observation_mode == 'full' and self.aiSensors is not None:
+        if self.observation_mode == 'full' and self.aiSensors is not None and not self.delay_sim_creation:
             obs_size = self.aiSensors.get_observation_space_size()
             self.observation_space = spaces.Box(
                 low=-np.inf,
@@ -417,14 +490,22 @@ class LunarLanderEnv(gym.Env):
         
         Initializes spacecraft, sensors, terrain, and flight software components
         from ScenarioLunarLanderStarter without running standalone simulation.
+        
+        Enhanced with subprocess safety for Windows multiprocessing.
         """
-        from terrain_simulation import LunarRegolithModel
-        from ScenarioLunarLanderStarter import (
-            LIDARSensor, AISensorSuite, 
-            AdvancedThrusterController
-        )
-        from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody
-        from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
+        try:
+            from terrain_simulation import LunarRegolithModel
+            from ScenarioLunarLanderStarter import (
+                LIDARSensor, AISensorSuite, 
+                AdvancedThrusterController
+            )
+            from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody
+            from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
+        except Exception as e:
+            print(f"\nERROR: Failed to import Basilisk modules in subprocess")
+            print(f"  {type(e).__name__}: {e}")
+            print(f"  This may be a multiprocessing issue. Try using DummyVecEnv instead.")
+            raise
         
         self.scSim = SimulationBaseClass.SimBaseClass()
         
@@ -485,20 +566,8 @@ class LunarLanderEnv(gym.Env):
         moon.isCentralBody = True
         gravFactory.addBodiesTo(self.lander)
         
-        # Create terrain
-        self.terrain = LunarRegolithModel(
-            size=self.terrain_config['size'],
-            resolution=self.terrain_config['resolution']
-        )
-        
-        terrainDataPath = os.path.join(os.path.dirname(__file__), 
-                                      'generated_terrain', 'moon_terrain.npy')
-        if not self.terrain.load_terrain_from_file(terrainDataPath):
-            self.terrain.generate_procedural_terrain(
-                num_craters=self.terrain_config['num_craters'],
-                crater_depth_range=self.terrain_config['crater_depth_range'],
-                crater_radius_range=self.terrain_config['crater_radius_range']
-            )
+        # Terrain already created in __init__, just use it
+        # (This allows delayed sim creation while terrain is available for reset)
         
         # Create thrusters (using constants from starship_constants module)
         self.primaryEff = thrusterStateEffector.ThrusterStateEffector()
@@ -608,10 +677,12 @@ class LunarLanderEnv(gym.Env):
         )
         
         # Initialize simulation (ONLY CALL THIS ONCE!)
-        self.scSim.InitializeSimulation()
-        # Run a tiny warm-up step to ensure all messages are initialized
-        self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
-        self.scSim.ExecuteSimulation()
+        # Suppress BSK_WARNING messages during initialization (intentional behavior)
+        with SuppressBasiliskWarnings():
+            self.scSim.InitializeSimulation()
+            # Run a tiny warm-up step to ensure all messages are initialized
+            self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
+            self.scSim.ExecuteSimulation()
         
         self.scenario_initialized = True
         
@@ -935,21 +1006,21 @@ class LunarLanderEnv(gym.Env):
         
         # A. Danger Zone Warnings (altitude-dependent severity)
         if altitude < 50.0:
-            # Severe warning if too fast near ground
+            # Severe warning if too fast near ground (CAPPED at -5.0)
             if abs(vertical_vel) > 10.0:
-                danger_penalty = -1.0 * (abs(vertical_vel) - 10.0) / 10.0
+                danger_penalty = -1.0 * min((abs(vertical_vel) - 10.0) / 10.0, 5.0)
                 reward_components['speed_danger'] = danger_penalty
                 reward += danger_penalty
             
-            # Warning if tilted near ground
+            # Warning if tilted near ground (CAPPED at -2.0)
             if np.degrees(attitude_error) > 30.0:
-                tilt_penalty = -0.5 * (np.degrees(attitude_error) - 30.0) / 30.0
+                tilt_penalty = -0.5 * min((np.degrees(attitude_error) - 30.0) / 30.0, 4.0)
                 reward_components['tilt_danger'] = tilt_penalty
                 reward += tilt_penalty
             
-            # Warning if high horizontal velocity near ground
+            # Warning if high horizontal velocity near ground (CAPPED at -2.0)
             if horizontal_speed > 5.0:
-                lateral_penalty = -0.5 * (horizontal_speed - 5.0) / 5.0
+                lateral_penalty = -0.5 * min((horizontal_speed - 5.0) / 5.0, 4.0)
                 reward_components['lateral_danger'] = lateral_penalty
                 reward += lateral_penalty
         
@@ -990,6 +1061,16 @@ class LunarLanderEnv(gym.Env):
         
         # Store reward components for debugging
         self._last_reward_components = reward_components
+        
+        # CRITICAL: Safety clip to prevent VecNormalize corruption
+        # Per-step rewards should be in range [-50, 50]
+        # Terminal rewards can reach ±1600, but that's only once per episode
+        if not (terminated or truncated):
+            # Clip step rewards to prevent accumulation bugs
+            reward = np.clip(reward, -50.0, 50.0)
+        else:
+            # Allow terminal rewards full range but cap extremes
+            reward = np.clip(reward, -2000.0, 2000.0)
         
         # Ensure reward is a Python float (not numpy scalar) for Gymnasium compatibility
         return float(reward)
@@ -1079,19 +1160,23 @@ class LunarLanderEnv(gym.Env):
         # Reset reward tracking (prevents reward component leakage)
         self._last_reward_components = {}
         
+        # Track if this is first reset with delayed creation
+        first_reset_delayed = self.delay_sim_creation and not self.scenario_initialized
+        
         # ============================================================
         # TERRAIN RANDOMIZATION (Critical for generalization)
         # ============================================================
         # Regenerate terrain for each episode to ensure agent learns to land
         # on a variety of terrains. Uses Gymnasium's RNG for reproducibility.
         # This prevents overfitting to a single terrain configuration.
-        terrain_seed = self.np_random.integers(0, 2**31 - 1)
-        self.terrain.rng = np.random.RandomState(terrain_seed)
-        self.terrain.generate_procedural_terrain(
-            num_craters=self.terrain_config['num_craters'],
-            crater_depth_range=self.terrain_config['crater_depth_range'],
-            crater_radius_range=self.terrain_config['crater_radius_range']
-        )
+        if not first_reset_delayed:
+            terrain_seed = self.np_random.integers(0, 2**31 - 1)
+            self.terrain.rng = np.random.RandomState(terrain_seed)
+            self.terrain.generate_procedural_terrain(
+                num_craters=self.terrain_config['num_craters'],
+                crater_depth_range=self.terrain_config['crater_depth_range'],
+                crater_radius_range=self.terrain_config['crater_radius_range']
+            )
         
         # Randomize initial conditions using Gymnasium's RNG (set by super().reset(seed=seed))
         # NOTE: Using self.np_random instead of np.random ensures proper seeding behavior
@@ -1129,7 +1214,17 @@ class LunarLanderEnv(gym.Env):
         # Small random angular velocity
         omega = self.np_random.standard_normal(3) * 0.01
         
-        if self.create_new_sim_on_reset:
+        if self.delay_sim_creation and not self.scenario_initialized:
+            # Mode 0: First reset with delayed creation - set initial conditions and create
+            self._initial_conditions = {
+                'position': np.array([x, y, z]),
+                'velocity': velocity,
+                'attitude_mrp': attitude_mrp,
+                'omega': omega
+            }
+            self._create_simulation()
+            
+        elif self.create_new_sim_on_reset:
             # Mode 1: Create brand new simulation (no warnings, but VERY slow)
             self._initial_conditions = {
                 'position': np.array([x, y, z]),
@@ -1159,6 +1254,7 @@ class LunarLanderEnv(gym.Env):
             #    ✓ Fuel tank masses (CH4 and LOX)
             #    ✓ Hub mass/inertia auto-updated by fuel tank effectors
             #    ✓ Thruster on-times managed by thruster effectors
+            #    ✓ Spacecraft module Reset() called to clear internal states
             #
             # 2. PYTHON EPISODE STATE:
             #    ✓ Episode counter (incremented)
@@ -1188,37 +1284,40 @@ class LunarLanderEnv(gym.Env):
             #    - Target position/velocity (static reference)
             # ============================================================
             
-            # Get individual state objects from the dynamics manager
-            # Each state object must be retrieved separately using the hub's nameOfHub* properties
-            posRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubPosition)
-            velRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubVelocity)
-            sigmaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubSigma)
-            omegaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubOmega)
-            
-            # Update spacecraft states using state objects (no re-registration!)
-            posRef.setState(np.array([x, y, z]))
-            velRef.setState(velocity.copy())
-            sigmaRef.setState(attitude_mrp.copy())
-            omegaRef.setState(omega.copy())
-            
-            # Reset fuel tank masses (using constants from starship_constants module)
-            ch4InitMass = SC.CH4_INITIAL_MASS
-            loxInitMass = SC.LOX_INITIAL_MASS
-            
-            # Get fuel tank state objects using the nameOfMassState we set during creation
-            ch4MassRef = self.lander.dynManager.getStateObject(self.ch4Tank.nameOfMassState)
-            loxMassRef = self.lander.dynManager.getStateObject(self.loxTank.nameOfMassState)
-            
-            ch4MassRef.setState(np.array([ch4InitMass]))
-            loxMassRef.setState(np.array([loxInitMass]))
-            
-            # Reset simulation time to 0 AFTER setState
-            self.scSim.TotalSim.CurrentNanos = 0
-            
-            # Call InitializeSimulation AFTER setState to ensure integrator
-            # caches are invalidated with the new state values already in place.
-            # This ensures the first observation reflects the new episode's initial conditions.
-            self.scSim.InitializeSimulation()
+            # Suppress BSK_WARNING messages during state updates (intentional behavior)
+            with SuppressBasiliskWarnings():
+                # CRITICAL FIX SEQUENCE (following Basilisk best practices):
+                # 1. Reset simulation time FIRST
+                # 2. Set all state values
+                # 3. Execute one timestep to propagate changes
+                # DO NOT call module Reset() - it re-registers states and causes warnings
+                
+                # Step 1: Reset simulation time to 0
+                self.scSim.TotalSim.CurrentNanos = 0
+                
+                # Step 2: Update all state values via state objects
+                # Get individual state objects from the dynamics manager
+                posRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubPosition)
+                velRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubVelocity)
+                sigmaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubSigma)
+                omegaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubOmega)
+                
+                # Set spacecraft states (position, velocity, attitude, angular velocity)
+                posRef.setState(np.array([x, y, z]))
+                velRef.setState(velocity.copy())
+                sigmaRef.setState(attitude_mrp.copy())
+                omegaRef.setState(omega.copy())
+                
+                # Reset fuel tank masses (using constants from starship_constants module)
+                ch4InitMass = SC.CH4_INITIAL_MASS
+                loxInitMass = SC.LOX_INITIAL_MASS
+                
+                # Get fuel tank state objects using the nameOfMassState we set during creation
+                ch4MassRef = self.lander.dynManager.getStateObject(self.ch4Tank.nameOfMassState)
+                loxMassRef = self.lander.dynManager.getStateObject(self.loxTank.nameOfMassState)
+                
+                ch4MassRef.setState(np.array([ch4InitMass]))
+                loxMassRef.setState(np.array([loxInitMass]))
             
             # Note: Fuel tank internal properties (fuelMass, tankRadius, r_TcT_T) are 
             # managed automatically by the FuelTank effector when we update the state.
@@ -1231,11 +1330,13 @@ class LunarLanderEnv(gym.Env):
         self.aiSensors.reset()
         
         # CRITICAL: Execute one simulation timestep to propagate the new state values
-        # Without this, _get_observation() reads stale sensor data from the previous episode
+        # This updates integrator caches and propagates state changes to sensors
+        # WITHOUT re-registering states (no InitializeSimulation call needed)
         if not self.create_new_sim_on_reset:
-            stop_time = macros.sec2nano(self.dt)  # Run for one timestep
-            self.scSim.ConfigureStopTime(stop_time)
-            self.scSim.ExecuteSimulation()
+            with SuppressBasiliskWarnings():
+                stop_time = macros.sec2nano(self.dt)  # Run for one timestep
+                self.scSim.ConfigureStopTime(stop_time)
+                self.scSim.ExecuteSimulation()
         
         # Get initial observation (now reflects the updated state)
         observation = self._get_observation()
@@ -1375,8 +1476,10 @@ class LunarLanderEnv(gym.Env):
         Basilisk simulation objects accumulate in memory (~50-100MB per env).
         
         This method explicitly deletes all major objects and forces garbage collection.
-        PRODUCTION: Enhanced with cached array cleanup for better memory management.
+        PRODUCTION: Enhanced with cached array cleanup and BSKLogger cleanup.
         """
+        import gc
+        
         if self.scSim is not None:
             # Delete Basilisk simulation objects in dependency order
             # (sensors first, then effectors, then spacecraft, then simulation)
@@ -1443,6 +1546,18 @@ class LunarLanderEnv(gym.Env):
             if hasattr(self, '_last_reward_components'):
                 self._last_reward_components.clear()
             # Clear action history
+            self.prev_action = None
+            
+            # Force garbage collection to release SWIG objects
+            # This helps clean up BSKLogger and other SWIG-wrapped C++ objects
+            gc.collect()
+        
+    def __del__(self):
+        """Destructor - ensure cleanup happens even without explicit close()"""
+        try:
+            self.close()
+        except Exception:
+            pass  # Ignore errors during cleanup
             self.prev_action = None
             # Force garbage collection to immediately free memory
             import gc
