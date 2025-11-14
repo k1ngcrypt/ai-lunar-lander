@@ -109,8 +109,10 @@ def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
         setup_basilisk_path()
         from lunar_lander_env import LunarLanderEnv
         
-        # Add flag to improve performance during reset
-        config['create_new_sim_on_reset'] = False
+        # CRITICAL FIX: The state engine approach has a fundamental bug where setState()
+        # doesn't properly update the integrator's cached initial conditions.
+        # We must delay simulation creation until the first reset() call.
+        config['delay_sim_creation'] = True
         env = LunarLanderEnv(**config)
         env.reset(seed=seed + rank)
         return env
@@ -549,9 +551,9 @@ class UnifiedTrainer:
         return VecNormalize(
             env,
             norm_obs=True,           # Normalize observations to zero mean, unit variance
-            norm_reward=training,    # Normalize rewards during training only
+            norm_reward=False,       # DISABLED: Reward normalization corrupts learning signal
             clip_obs=10.0,           # Clip normalized observations to [-10, 10]
-            clip_reward=100.0,       # INCREASED: Clip normalized rewards to [-100, 100] (was 10)
+            clip_reward=10.0,        # Not used when norm_reward=False, but keep for safety
             gamma=0.99,              # Discount factor for reward normalization
             epsilon=1e-8             # Small value to avoid division by zero
         )

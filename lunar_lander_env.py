@@ -143,7 +143,8 @@ class LunarLanderEnv(gym.Env):
                  initial_altitude_range=(18000.0, 22000.0),
                  initial_velocity_range=((-200.0, 200.0), (-200.0, 200.0), (-100.0, -50.0)),
                  terrain_config=None,
-                 create_new_sim_on_reset=False):
+                 create_new_sim_on_reset=False,
+                 delay_sim_creation=False):
         """
         Initialize Lunar Lander Gymnasium Environment
         
@@ -156,6 +157,7 @@ class LunarLanderEnv(gym.Env):
                                     Default simulates descent from ~20km with ~200 m/s horizontal speed
             terrain_config: Dict with terrain generation parameters
             create_new_sim_on_reset: If True, recreate simulation each reset (slow but clean).
+            delay_sim_creation: If True, delay simulation creation until first reset (fixes init bug).
                                      If False, reuse simulation (fast)
         """
         super().__init__()
@@ -166,6 +168,7 @@ class LunarLanderEnv(gym.Env):
         self.initial_altitude_range = initial_altitude_range
         self.initial_velocity_range = initial_velocity_range
         self.create_new_sim_on_reset = create_new_sim_on_reset
+        self.delay_sim_creation = delay_sim_creation
         
         # Episode tracking
         self.current_step = 0
@@ -258,9 +261,23 @@ class LunarLanderEnv(gym.Env):
         self.scenario_initialized = False
         self.scSim = None
         self.lander = None
-        self.terrain = None
         self.aiSensors = None
         self.thrController = None
+        
+        # Create terrain immediately (needed for reset even if sim is delayed)
+        from terrain_simulation import LunarRegolithModel
+        self.terrain = LunarRegolithModel(
+            size=self.terrain_config['size'],
+            resolution=self.terrain_config['resolution']
+        )
+        terrainDataPath = os.path.join(os.path.dirname(__file__), 
+                                      'generated_terrain', 'moon_terrain.npy')
+        if not self.terrain.load_terrain_from_file(terrainDataPath):
+            self.terrain.generate_procedural_terrain(
+                num_craters=self.terrain_config['num_craters'],
+                crater_depth_range=self.terrain_config['crater_depth_range'],
+                crater_radius_range=self.terrain_config['crater_radius_range']
+            )
         
         # Initial conditions storage (used by _create_simulation)
         self._initial_conditions = {
@@ -271,9 +288,11 @@ class LunarLanderEnv(gym.Env):
         }
         
         # Initialize simulation (called only ONCE unless create_new_sim_on_reset=True)
-        self._create_simulation()
+        # OR delay until first reset() if delay_sim_creation=True
+        if not self.delay_sim_creation:
+            self._create_simulation()
         
-        if self.observation_mode == 'full' and self.aiSensors is not None:
+        if self.observation_mode == 'full' and self.aiSensors is not None and not self.delay_sim_creation:
             obs_size = self.aiSensors.get_observation_space_size()
             self.observation_space = spaces.Box(
                 low=-np.inf,
@@ -546,20 +565,8 @@ class LunarLanderEnv(gym.Env):
         moon.isCentralBody = True
         gravFactory.addBodiesTo(self.lander)
         
-        # Create terrain
-        self.terrain = LunarRegolithModel(
-            size=self.terrain_config['size'],
-            resolution=self.terrain_config['resolution']
-        )
-        
-        terrainDataPath = os.path.join(os.path.dirname(__file__), 
-                                      'generated_terrain', 'moon_terrain.npy')
-        if not self.terrain.load_terrain_from_file(terrainDataPath):
-            self.terrain.generate_procedural_terrain(
-                num_craters=self.terrain_config['num_craters'],
-                crater_depth_range=self.terrain_config['crater_depth_range'],
-                crater_radius_range=self.terrain_config['crater_radius_range']
-            )
+        # Terrain already created in __init__, just use it
+        # (This allows delayed sim creation while terrain is available for reset)
         
         # Create thrusters (using constants from starship_constants module)
         self.primaryEff = thrusterStateEffector.ThrusterStateEffector()
@@ -998,21 +1005,21 @@ class LunarLanderEnv(gym.Env):
         
         # A. Danger Zone Warnings (altitude-dependent severity)
         if altitude < 50.0:
-            # Severe warning if too fast near ground
+            # Severe warning if too fast near ground (CAPPED at -5.0)
             if abs(vertical_vel) > 10.0:
-                danger_penalty = -1.0 * (abs(vertical_vel) - 10.0) / 10.0
+                danger_penalty = -1.0 * min((abs(vertical_vel) - 10.0) / 10.0, 5.0)
                 reward_components['speed_danger'] = danger_penalty
                 reward += danger_penalty
             
-            # Warning if tilted near ground
+            # Warning if tilted near ground (CAPPED at -2.0)
             if np.degrees(attitude_error) > 30.0:
-                tilt_penalty = -0.5 * (np.degrees(attitude_error) - 30.0) / 30.0
+                tilt_penalty = -0.5 * min((np.degrees(attitude_error) - 30.0) / 30.0, 4.0)
                 reward_components['tilt_danger'] = tilt_penalty
                 reward += tilt_penalty
             
-            # Warning if high horizontal velocity near ground
+            # Warning if high horizontal velocity near ground (CAPPED at -2.0)
             if horizontal_speed > 5.0:
-                lateral_penalty = -0.5 * (horizontal_speed - 5.0) / 5.0
+                lateral_penalty = -0.5 * min((horizontal_speed - 5.0) / 5.0, 4.0)
                 reward_components['lateral_danger'] = lateral_penalty
                 reward += lateral_penalty
         
@@ -1053,6 +1060,16 @@ class LunarLanderEnv(gym.Env):
         
         # Store reward components for debugging
         self._last_reward_components = reward_components
+        
+        # CRITICAL: Safety clip to prevent VecNormalize corruption
+        # Per-step rewards should be in range [-50, 50]
+        # Terminal rewards can reach ±1600, but that's only once per episode
+        if not (terminated or truncated):
+            # Clip step rewards to prevent accumulation bugs
+            reward = np.clip(reward, -50.0, 50.0)
+        else:
+            # Allow terminal rewards full range but cap extremes
+            reward = np.clip(reward, -2000.0, 2000.0)
         
         # Ensure reward is a Python float (not numpy scalar) for Gymnasium compatibility
         return float(reward)
@@ -1142,19 +1159,23 @@ class LunarLanderEnv(gym.Env):
         # Reset reward tracking (prevents reward component leakage)
         self._last_reward_components = {}
         
+        # Track if this is first reset with delayed creation
+        first_reset_delayed = self.delay_sim_creation and not self.scenario_initialized
+        
         # ============================================================
         # TERRAIN RANDOMIZATION (Critical for generalization)
         # ============================================================
         # Regenerate terrain for each episode to ensure agent learns to land
         # on a variety of terrains. Uses Gymnasium's RNG for reproducibility.
         # This prevents overfitting to a single terrain configuration.
-        terrain_seed = self.np_random.integers(0, 2**31 - 1)
-        self.terrain.rng = np.random.RandomState(terrain_seed)
-        self.terrain.generate_procedural_terrain(
-            num_craters=self.terrain_config['num_craters'],
-            crater_depth_range=self.terrain_config['crater_depth_range'],
-            crater_radius_range=self.terrain_config['crater_radius_range']
-        )
+        if not first_reset_delayed:
+            terrain_seed = self.np_random.integers(0, 2**31 - 1)
+            self.terrain.rng = np.random.RandomState(terrain_seed)
+            self.terrain.generate_procedural_terrain(
+                num_craters=self.terrain_config['num_craters'],
+                crater_depth_range=self.terrain_config['crater_depth_range'],
+                crater_radius_range=self.terrain_config['crater_radius_range']
+            )
         
         # Randomize initial conditions using Gymnasium's RNG (set by super().reset(seed=seed))
         # NOTE: Using self.np_random instead of np.random ensures proper seeding behavior
@@ -1192,7 +1213,17 @@ class LunarLanderEnv(gym.Env):
         # Small random angular velocity
         omega = self.np_random.standard_normal(3) * 0.01
         
-        if self.create_new_sim_on_reset:
+        if self.delay_sim_creation and not self.scenario_initialized:
+            # Mode 0: First reset with delayed creation - set initial conditions and create
+            self._initial_conditions = {
+                'position': np.array([x, y, z]),
+                'velocity': velocity,
+                'attitude_mrp': attitude_mrp,
+                'omega': omega
+            }
+            self._create_simulation()
+            
+        elif self.create_new_sim_on_reset:
             # Mode 1: Create brand new simulation (no warnings, but VERY slow)
             self._initial_conditions = {
                 'position': np.array([x, y, z]),
