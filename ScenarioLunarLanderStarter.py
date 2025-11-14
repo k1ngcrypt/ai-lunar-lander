@@ -2,8 +2,8 @@
 ScenarioLunarLanderStarter.py
 Basilisk lunar lander scenario for Starship HLS (Human Landing System)
 
-This script demonstrates the high-fidelity Basilisk simulation used for RL training.
-All physical constants are imported from starship_constants.py module.
+This module provides classes and functions for high-fidelity Basilisk simulation
+used for RL training. Can be imported as a module or run standalone.
 
 KEY FEATURES:
 - Realistic Starship HLS configuration (1.3M kg initial mass, 3 Raptor engines)
@@ -23,8 +23,12 @@ COORDINATE SYSTEM:
 - +Z is nose/up
 - +X is forward, +Y is starboard
 
-NOTE: This script runs a standalone demo. For RL training, use lunar_lander_env.py
-which wraps these components in a Gymnasium interface.
+USAGE:
+  As module (for RL training):
+    from ScenarioLunarLanderStarter import LIDARSensor, AISensorSuite, AdvancedThrusterController
+    
+  As standalone:
+    python ScenarioLunarLanderStarter.py
 """
 
 import os
@@ -47,256 +51,11 @@ from Basilisk.architecture import messaging
 # Import Starship HLS configuration constants
 import starship_constants as SC
 
-# ----------------------------------------------------------------------
-# 1. Simulation Setup
-# ----------------------------------------------------------------------
 
-# Create simulation base class
-scSim = SimulationBaseClass.SimBaseClass()
+# ======================================================================
+# EXPORTED CLASSES (for use by lunar_lander_env.py)
+# ======================================================================
 
-# Create process and tasks
-simProcessName = "simProcess"
-dynTaskName = "dynTask"
-fswTaskName = "fswTask"
-
-dynProcess = scSim.CreateNewProcess(simProcessName)
-simulationTimeStep = macros.sec2nano(0.1)  # 0.1 second timestep
-fswTimeStep = macros.sec2nano(0.5)         # FSW runs at 2 Hz
-
-dynProcess.addTask(scSim.CreateNewTask(dynTaskName, simulationTimeStep))
-dynProcess.addTask(scSim.CreateNewTask(fswTaskName, fswTimeStep))
-
-# ----------------------------------------------------------------------
-# 2. Create Spacecraft - Starship HLS Configuration
-# ----------------------------------------------------------------------
-# NOTE: All Starship constants imported from starship_constants module (as SC)
-
-lander = spacecraft.Spacecraft()
-lander.ModelTag = "Starship_HLS"
-lander.hub.mHub = SC.HUB_MASS
-lander.hub.r_BcB_B = SC.CENTER_OF_MASS_OFFSET
-lander.hub.IHubPntBc_B = SC.INERTIA_TENSOR_FULL
-lander.hub.r_CN_NInit = np.array([0., 0., 1500.0])   # 1500 m altitude above Moon surface
-lander.hub.v_CN_NInit = np.array([0., 0., -10.0])    # descending at 10 m/s
-lander.hub.sigma_BNInit = np.array([0., 0., 0.])     # no initial attitude
-lander.hub.omega_BN_BInit = np.zeros(3)              # no rotation
-
-scSim.AddModelToTask(dynTaskName, lander)
-
-# ----------------------------------------------------------------------
-# 2a. Add Propellant Tanks - CH4 and LOX
-# ----------------------------------------------------------------------
-# NOTE: Tank parameters from starship_constants module
-
-# CH4 Tank (Methane)
-ch4Tank = fuelTank.FuelTank()
-ch4Tank.ModelTag = "CH4_Tank"
-ch4TankModel = fuelTank.FuelTankModelConstantVolume()
-ch4TankModel.propMassInit = SC.CH4_INITIAL_MASS
-ch4TankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
-ch4TankModel.radiusTankInit = SC.CH4_TANK_RADIUS
-ch4Tank.setTankModel(ch4TankModel)
-ch4Tank.r_TB_B = SC.CH4_TANK_POSITION
-ch4Tank.nameOfMassState = "ch4TankMass"
-lander.addStateEffector(ch4Tank)
-scSim.AddModelToTask(dynTaskName, ch4Tank)
-
-# LOX Tank (Liquid Oxygen)
-loxTank = fuelTank.FuelTank()
-loxTank.ModelTag = "LOX_Tank"
-loxTankModel = fuelTank.FuelTankModelConstantVolume()
-loxTankModel.propMassInit = SC.LOX_INITIAL_MASS
-loxTankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
-loxTankModel.radiusTankInit = SC.LOX_TANK_RADIUS
-loxTank.setTankModel(loxTankModel)
-loxTank.r_TB_B = SC.LOX_TANK_POSITION
-loxTank.nameOfMassState = "loxTankMass"
-lander.addStateEffector(loxTank)
-scSim.AddModelToTask(dynTaskName, loxTank)
-
-# ----------------------------------------------------------------------
-# 3. Setup Gravity
-# ----------------------------------------------------------------------
-gravFactory = simIncludeGravBody.gravBodyFactory()
-moon = gravFactory.createMoon()
-moon.isCentralBody = True
-gravFactory.addBodiesTo(lander)
-
-# ----------------------------------------------------------------------
-# 3a. Lightweight Analytical Terrain Model (Replaces Chrono DEM)
-# ----------------------------------------------------------------------
-print("\n" + "="*60)
-print("INITIALIZING ANALYTICAL TERRAIN SYSTEM")
-print("="*60)
-
-# Create terrain model instance
-terrain = LunarRegolithModel(size=2000.0, resolution=200)
-
-# Try to load terrain from file (if available)
-terrainDataPath = os.path.join(os.path.dirname(__file__), 'generated_terrain', 'moon_terrain.npy')
-if not terrain.load_terrain_from_file(terrainDataPath):
-    # Fall back to procedural generation
-    print("  Generating procedural terrain...")
-    terrain.generate_procedural_terrain(num_craters=15, 
-                                        crater_depth_range=(3, 12), 
-                                        crater_radius_range=(15, 60))
-
-print("="*60 + "\n")
-
-# ----------------------------------------------------------------------
-# 3b. External Force Effector for Terrain Contact
-# ----------------------------------------------------------------------
-# Use Basilisk's extForceTorque module to apply terrain contact forces
-
-terrainForceEff = extForceTorque.ExtForceTorque()
-terrainForceEff.ModelTag = "TerrainContactForce"
-scSim.AddModelToTask(dynTaskName, terrainForceEff)
-lander.addDynamicEffector(terrainForceEff)
-
-# ----------------------------------------------------------------------
-# 3c. Setup Aerodynamics (minimal effect on Moon)
-# ----------------------------------------------------------------------
-# Moon has essentially no atmosphere (exosphere ~10^-15 kg/m³), but
-# aerodynamic effector is included for realism and future Earth reentry simulations.
-
-dragEffector = dragDynamicEffector.DragDynamicEffector()
-dragEffector.ModelTag = "DragEffector"
-dragEffector.coreParams.projectedArea = 63.617  # m² (π × radius²)
-dragEffector.coreParams.dragCoeff = 0.6
-dragEffector.coreParams.comOffset = [0.0, 0.0, 0.0]
-
-# Add drag effector to spacecraft
-lander.addDynamicEffector(dragEffector)
-scSim.AddModelToTask(dynTaskName, dragEffector)
-
-# Moon exosphere model (essentially vacuum)
-moonAtmo = exponentialAtmosphere.ExponentialAtmosphere()
-moonAtmo.ModelTag = "MoonAtmosphere"
-moonAtmo.planetRadius = moon.radEquator
-moonAtmo.scaleHeight = 100000.0  # m (arbitrary large value)
-moonAtmo.baseDensity = 1e-15  # kg/m³ (Moon's exosphere density)
-moonAtmo.envMinReach = -10000.0
-moonAtmo.envMaxReach = 10000.0
-moonAtmo.addSpacecraftToModel(lander.scStateOutMsg)
-scSim.AddModelToTask(dynTaskName, moonAtmo)
-
-# Connect atmosphere to drag effector
-dragEffector.atmoDensInMsg.subscribeTo(moonAtmo.envOutMsgs[0])
-
-# ----------------------------------------------------------------------
-# 4. Add Thrusters - Starship HLS Configuration (thrusterStateEffector for fuel integration)
-# ----------------------------------------------------------------------
-# Using thrusterStateEffector instead of thrusterDynamicEffector for:
-# - Automatic fuel tank depletion
-# - Isp-based performance modeling
-# - Multiple fuel tank connections per thruster
-# - Gimbal actuation support
-# 
-# NOTE: MAX_EFF_CNT = 36, so we need separate effectors for each thruster group
-# to avoid exceeding the limit (3 + 12 + 24 = 39 > 36)
-
-# Create separate thruster state effectors for each group
-primaryEff = thrusterStateEffector.ThrusterStateEffector()
-primaryEff.ModelTag = "PrimaryThrusters"
-scSim.AddModelToTask(dynTaskName, primaryEff)
-lander.addStateEffector(primaryEff)
-
-midbodyEff = thrusterStateEffector.ThrusterStateEffector()
-midbodyEff.ModelTag = "MidBodyThrusters"
-scSim.AddModelToTask(dynTaskName, midbodyEff)
-lander.addStateEffector(midbodyEff)
-
-rcsEff = thrusterStateEffector.ThrusterStateEffector()
-rcsEff.ModelTag = "RCSThrusters"
-scSim.AddModelToTask(dynTaskName, rcsEff)
-lander.addStateEffector(rcsEff)
-
-# PRIMARY AFT ENGINES (3 Vacuum Raptors with gimbal)
-# NOTE: All thruster configuration from starship_constants module
-
-print(f"\nPrimary Engine Fuel Consumption (per engine @ 100%):")
-print(f"  Total mass flow: {SC.PER_ENGINE_MASS_FLOW:.2f} kg/s")
-print(f"  CH4 flow: {SC.CH4_FLOW_PER_ENGINE:.2f} kg/s")
-print(f"  LOX flow: {SC.LOX_FLOW_PER_ENGINE:.2f} kg/s")
-
-for pos in SC.PRIMARY_ENGINE_POSITIONS:
-    thrConfig = thrusterStateEffector.THRSimConfig()
-    thrConfig.thrLoc_B = np.array(pos, dtype=float)
-    thrConfig.thrDir_B = SC.PRIMARY_ENGINE_DIRECTION
-    thrConfig.MaxThrust = SC.MAX_THRUST_PER_ENGINE
-    thrConfig.steadyIsp = SC.VACUUM_ISP
-    primaryEff.addThruster(thrConfig, lander.scStateOutMsg)
-
-# Store indices for easy reference
-PRIMARY_START = SC.PRIMARY_ENGINE_START_INDEX
-PRIMARY_COUNT = SC.PRIMARY_ENGINE_COUNT
-
-# MID-BODY THRUSTERS (12 thrusters for attitude control)
-for pos in SC.MIDBODY_THRUSTER_POSITIONS:
-    direction = SC.get_midbody_thruster_direction(pos)
-    thrConfig = thrusterStateEffector.THRSimConfig()
-    thrConfig.thrLoc_B = np.array(pos, dtype=float)
-    thrConfig.thrDir_B = np.array(direction, dtype=float)
-    thrConfig.MaxThrust = SC.MIDBODY_THRUST
-    thrConfig.steadyIsp = SC.VACUUM_ISP
-    midbodyEff.addThruster(thrConfig, lander.scStateOutMsg)
-
-MIDBODY_START = SC.MIDBODY_THRUSTER_START_INDEX
-MIDBODY_COUNT = SC.MIDBODY_THRUSTER_COUNT
-
-# RCS THRUSTERS (24 thrusters: 12 at top ring, 12 at bottom ring)
-for pos in SC.RCS_THRUSTER_POSITIONS:
-    direction = SC.get_rcs_thruster_direction(pos)
-    thrConfig = thrusterStateEffector.THRSimConfig()
-    thrConfig.thrLoc_B = np.array(pos, dtype=float)
-    thrConfig.thrDir_B = np.array(direction, dtype=float)
-    thrConfig.MaxThrust = SC.RCS_THRUST
-    thrConfig.steadyIsp = SC.VACUUM_ISP
-    rcsEff.addThruster(thrConfig, lander.scStateOutMsg)
-
-RCS_START = SC.RCS_THRUSTER_START_INDEX
-RCS_COUNT = SC.RCS_THRUSTER_COUNT
-
-# Total thrusters
-TOTAL_THRUSTERS = SC.TOTAL_THRUSTER_COUNT
-
-# Connect fuel tanks to thruster effectors for automatic fuel depletion
-# This enables Basilisk to automatically deplete fuel based on thrust and Isp
-ch4Tank.addThrusterSet(primaryEff)
-ch4Tank.addThrusterSet(midbodyEff)
-ch4Tank.addThrusterSet(rcsEff)
-
-loxTank.addThrusterSet(primaryEff)
-loxTank.addThrusterSet(midbodyEff)
-loxTank.addThrusterSet(rcsEff)
-
-# Print thruster configuration summary
-print(f"\nThruster Configuration (thrusterStateEffector):")
-print(f"  - {PRIMARY_COUNT} Primary Raptor engines (2,500,000 N each, gimbal capable)")
-print(f"  - {MIDBODY_COUNT} Mid-body thrusters (20,000 N each)")
-print(f"  - {RCS_COUNT} RCS thrusters (2,000 N each)")
-print(f"  - Total: {TOTAL_THRUSTERS} thrusters")
-print(f"  - Split into 3 effectors (MAX_EFF_CNT=36 limit)")
-print(f"  - All thrusters connected to fuel tanks for automatic depletion")
-
-# ----------------------------------------------------------------------
-# 5. Add IMU Sensor - Starship HLS with Realistic Noise
-# ----------------------------------------------------------------------
-imu = imuSensor.ImuSensor()
-imu.ModelTag = "StarshipIMU"
-# IMU aligned with body frame (no rotation: yaw=0, pitch=0, roll=0)
-imu.setBodyToPlatformDCM(0.0, 0.0, 0.0)
-imu.scStateInMsg.subscribeTo(lander.scStateOutMsg)
-# Set error bounds (noise levels) - high-precision IMU for large spacecraft
-# Gyro noise: 0.00001 rad/s (typical for space-grade IMU)
-# Accel noise: 0.001 m/s² (typical for space-grade accelerometer)
-imu.setErrorBoundsGyro([0.00001] * 3)   # Very low gyro noise
-imu.setErrorBoundsAccel([0.001] * 3)    # Low accelerometer noise
-scSim.AddModelToTask(dynTaskName, imu)
-
-# ----------------------------------------------------------------------
-# 5a. LIDAR Sensor for Terrain Mapping
-# ----------------------------------------------------------------------
 class LIDARSensor:
     """
     Simulated LIDAR sensor for terrain mapping and obstacle detection.
@@ -461,14 +220,7 @@ class LIDARSensor:
         # No hit within max range
         return self.max_range, False
 
-# Create LIDAR sensor instance
-lidar = LIDARSensor(terrain, max_range=150.0, cone_angle=45.0, num_rays=64)
 
-print("="*60 + "\n")
-
-# ----------------------------------------------------------------------
-# 6. AI Sensor Suite - Comprehensive Sensor Integration for AI Agent
-# ----------------------------------------------------------------------
 class AISensorSuite:
     """
     Comprehensive sensor suite for AI agent control of lunar lander.
@@ -721,15 +473,6 @@ class AISensorSuite:
         self.accel_history = []
         self.gyro_history = []
 
-# ----------------------------------------------------------------------
-# 6a. Advanced Thruster Control FSW Module with Gimbal Support
-# ----------------------------------------------------------------------
-# Controller with:
-# - Throttle limits (40%-100% on main engines)
-# - Gimbal limits (±8°) with actuation
-# - Automatic fuel consumption via thrusterStateEffector
-# - Support for all thruster groups (primary, mid-body, RCS)
-# - Terrain contact force application
 
 class AdvancedThrusterController:
     """
@@ -1027,348 +770,371 @@ class AdvancedThrusterController:
         self.lastUpdateTime = 0.0
         self.gimbalAngles = np.zeros((3, 2))
         return
-        
-# ----------------------------------------------------------------------
-# 7. Instantiate AI Sensor Suite and Controller
-# ----------------------------------------------------------------------
-# Create AI sensor suite for comprehensive observation
-aiSensors = AISensorSuite(
-    scObject=lander,
-    imu=imu,
-    terrain=terrain,
-    lidar=lidar,
-    ch4Tank=ch4Tank,
-    loxTank=loxTank,
-    history_length=10  # Keep last 10 IMU measurements
-)
 
-# Set landing target (e.g., origin at surface level)
-aiSensors.set_target_state(
-    position=[0.0, 0.0, 0.0],  # Target landing at origin
-    velocity=[0.0, 0.0, 0.0],  # Zero velocity at touchdown
-    quaternion=[0.0, 0.0, 0.0, 1.0]  # Upright orientation
-)
 
-print(f"\nAI Sensor Suite Ready:")
-print(f"  Observation space size: {aiSensors.get_observation_space_size()} dimensions")
+# ======================================================================
+# STANDALONE SIMULATION FUNCTION
+# ======================================================================
 
-# Create thruster controller (Python-only class, not added to task)
-thrController = AdvancedThrusterController(primaryEff, midbodyEff, rcsEff, ch4Tank, loxTank, terrain, terrainForceEff, lander)
-
-# Note: thrController is a Python helper class, not a SysModel
-# It will be called manually in the simulation loop, not as a task
-# For automated control, you would implement a proper SysModel FSW module
-
-# Connect thruster effectors to controller messages
-primaryEff.cmdsInMsg.subscribeTo(thrController.primCmdMsg)
-midbodyEff.cmdsInMsg.subscribeTo(thrController.midCmdMsg)
-rcsEff.cmdsInMsg.subscribeTo(thrController.rcsCmdMsg)
-
-# Connect terrain force effector to controller's terrain force message
-terrainForceEff.cmdForceBodyInMsg.subscribeTo(thrController.terrainForceMsg)
-
-# ----------------------------------------------------------------------
-# 7. Setup Data Logging
-# ----------------------------------------------------------------------
-simulationTime = macros.sec2nano(60.0)  # 60 seconds
-numDataPoints = 600
-
-samplingTime = unitTestSupport.samplingTime(simulationTime, simulationTimeStep, numDataPoints)
-
-# Log spacecraft state
-scLog = lander.scStateOutMsg.recorder(samplingTime)
-scSim.AddModelToTask(dynTaskName, scLog)
-
-# Log IMU data
-imuLog = imu.sensorOutMsg.recorder(samplingTime)
-scSim.AddModelToTask(dynTaskName, imuLog)
-
-# Log thruster data - log first primary thruster
-primThrLog = primaryEff.thrusterOutMsgs[0].recorder(samplingTime)
-scSim.AddModelToTask(dynTaskName, primThrLog)
-
-# Log fuel tank masses
-ch4TankLog = ch4Tank.fuelTankOutMsg.recorder(samplingTime)
-scSim.AddModelToTask(dynTaskName, ch4TankLog)
-
-loxTankLog = loxTank.fuelTankOutMsg.recorder(samplingTime)
-scSim.AddModelToTask(dynTaskName, loxTankLog)
-
-# ----------------------------------------------------------------------
-# 8. Execute Simulation with AI Sensor Suite
-# ----------------------------------------------------------------------
-scSim.InitializeSimulation()
-scSim.ConfigureStopTime(simulationTime)
-
-print("\n" + "="*60)
-print("STARTING SIMULATION")
-print("="*60)
-print(f"Duration: {simulationTime * macros.NANO2SEC} seconds")
-print(f"Time step: {simulationTimeStep * macros.NANO2SEC} seconds")
-print("Terrain: Analytical regolith model (high performance)")
-print("Sensors: IMU, LIDAR, Altimeter, Fuel, Attitude (all with noise)")
-print("="*60 + "\n")
-
-# Test AI sensor suite during simulation
-print("Testing AI Sensor Suite (first 5 seconds)...\n")
-
-# Store sensor observations for analysis
-sensor_observations = []
-
-# Execute simulation with periodic sensor readouts
-current_time = 0.0
-step_count = 0
-sensor_read_interval = 0.5  # Read sensors every 0.5 seconds for demo
-
-scSim.InitializeSimulation()
-
-while current_time < simulationTime * macros.NANO2SEC:
-    # Update thruster controller (default hover test commands)
-    currentTimeNano = macros.sec2nano(current_time)
-    thrController.Update(currentTimeNano)
+def run():
+    """
+    Run standalone lunar lander simulation demonstration.
     
-    # Step simulation
-    scSim.ConfigureStopTime(macros.sec2nano(current_time + 0.1))
-    scSim.ExecuteSimulation()
+    This function demonstrates the high-fidelity Basilisk simulation with
+    all sensors and terrain contact forces. For RL training, use
+    lunar_lander_env.py which wraps these components in a Gymnasium interface.
+    """
+    print("\n" + "="*60)
+    print("BASILISK LUNAR LANDER - STANDALONE DEMONSTRATION")
+    print("="*60 + "\n")
     
-    current_time += 0.1
-    step_count += 1
+    # ----------------------------------------------------------------------
+    # 1. Simulation Setup
+    # ----------------------------------------------------------------------
     
-    # Read AI sensors periodically
-    if step_count % int(sensor_read_interval / 0.1) == 0 and current_time <= 5.0:
-        obs = aiSensors.update()
-        sensor_observations.append(obs)
-        
-        print(f"\n--- Sensor Reading at t={current_time:.1f}s ---")
-        print(f"Altitude (terrain-relative): {obs['altitude_terrain']:.2f} m")
-        print(f"Vertical velocity: {obs['vertical_velocity']:.2f} m/s")
-        print(f"Horizontal speed: {obs['horizontal_speed']:.2f} m/s")
-        print(f"Attitude error angle: {np.degrees(obs['attitude_error_angle']):.2f}°")
-        print(f"Fuel remaining: {obs['fuel_fraction']*100:.1f}% ({obs['fuel_mass']:.0f} kg)")
-        print(f"IMU accel (body): [{obs['imu_accel_current'][0]:.3f}, {obs['imu_accel_current'][1]:.3f}, {obs['imu_accel_current'][2]:.3f}] m/s²")
-        print(f"IMU gyro (body): [{obs['imu_gyro_current'][0]:.4f}, {obs['imu_gyro_current'][1]:.4f}, {obs['imu_gyro_current'][2]:.4f}] rad/s")
-        print(f"LIDAR: min_range={obs['lidar_min_range']:.1f}m, mean={obs['lidar_mean_range']:.1f}m, valid_returns={np.sum(obs['lidar_ranges']>0)}/{len(obs['lidar_ranges'])}")
-
-print("\n" + "="*60)
-print("SIMULATION COMPLETED")
-print("="*60 + "\n")
-
-# ----------------------------------------------------------------------
-# AI CONTROL INTERFACE DOCUMENTATION
-# ----------------------------------------------------------------------
-"""
-AI CONTROL INTERFACE:
-
-The AISensorSuite and AdvancedThrusterController provide a complete interface for AI agents.
-
-================================================================================
-SENSOR SUITE - AISensorSuite
-================================================================================
-
-1. GET COMPREHENSIVE OBSERVATIONS (recommended for AI):
-   
-   obs = aiSensors.update()
-   # Returns dict with ALL sensor data:
-   
-   IMU DATA (with noise and history):
-   - obs['imu_accel_current']: (3,) current acceleration in body frame [m/s²]
-   - obs['imu_gyro_current']: (3,) current angular velocity in body frame [rad/s]
-   - obs['imu_accel_history']: (history_length, 3) last N accel measurements
-   - obs['imu_gyro_history']: (history_length, 3) last N gyro measurements
-   
-   POSITION & VELOCITY:
-   - obs['position_inertial']: (3,) position [x, y, z] in inertial frame [m]
-   - obs['velocity_inertial']: (3,) velocity in inertial frame [m/s]
-   - obs['velocity_body']: (3,) velocity in body frame [m/s]
-   
-   TERRAIN-RELATIVE (critical for landing):
-   - obs['altitude_terrain']: altitude above LOCAL terrain [m]
-   - obs['terrain_height']: terrain elevation at current x,y [m]
-   - obs['vertical_velocity']: vertical velocity component [m/s]
-   - obs['horizontal_velocity_local']: (3,) horizontal velocity in local frame [m/s]
-   - obs['horizontal_speed']: horizontal speed magnitude [m/s]
-   
-   ATTITUDE:
-   - obs['attitude_quaternion']: (4,) current attitude [x, y, z, w]
-   - obs['attitude_mrp']: (3,) Modified Rodriguez Parameters
-   - obs['angular_velocity_body']: (3,) angular velocity [rad/s]
-   - obs['attitude_error_quaternion']: (4,) error to target attitude
-   - obs['attitude_error_angle']: scalar attitude error [radians]
-   
-   FUEL & MASS:
-   - obs['total_mass']: current total mass [kg]
-   - obs['fuel_mass']: remaining propellant [kg]
-   - obs['ch4_mass']: remaining CH4 [kg]
-   - obs['lox_mass']: remaining LOX [kg]
-   - obs['fuel_fraction']: remaining fuel percentage [0-1]
-   - obs['ch4_fraction']: remaining CH4 percentage [0-1]
-   - obs['lox_fraction']: remaining LOX percentage [0-1]
-   
-   LIDAR (with noise and dropouts):
-   - obs['lidar_point_cloud']: (num_rays, 3) 3D points in body frame [m]
-   - obs['lidar_ranges']: (num_rays,) range measurements [m], -1 = invalid
-   - obs['lidar_intensities']: (num_rays,) return intensities [0-1]
-   - obs['lidar_min_range']: minimum valid range [m]
-   - obs['lidar_mean_range']: mean valid range [m]
-   - obs['lidar_range_std']: range standard deviation [m]
-   
-   DERIVED:
-   - obs['gravity_body']: (3,) gravity vector in body frame [m/s²]
-   - obs['dcm_body_to_inertial']: (3,3) rotation matrix
-
-2. GET FLATTENED OBSERVATION (for neural networks):
-   
-   obs_vector = aiSensors.get_flattened_observation()
-   # Returns 1D numpy array with all sensor data concatenated
-   # Size: aiSensors.get_observation_space_size() dimensions
-
-3. SET TARGET STATE (for computing errors):
-   
-   aiSensors.set_target_state(
-       position=[0, 0, 0],  # Target landing position [m]
-       velocity=[0, 0, 0],  # Target velocity at touchdown [m/s]
-       quaternion=[0, 0, 0, 1]  # Target attitude (upright)
-   )
-
-4. RESET (call at start of new episode):
-   
-   aiSensors.reset()  # Clears IMU history buffers
-
-================================================================================
-THRUSTER CONTROL - AdvancedThrusterController
-================================================================================
-
-1. SET COMMANDS (call before simulation timestep):
-   
-   thrController.setThrusterCommands(
-       primaryThrottles=[0.5, 0.5, 0.5],  # 3 main engines [0.4-1.0]
-       midbodyThrottles=[0.1, 0, ...],     # 12 mid-body [0-1.0]
-       rcsThrottles=[0, 0.2, ...],         # 24 RCS [0-1.0]
-       gimbalAngles=[[0.1, -0.05], ...]   # 3x2 array [pitch, yaw] in radians
-   )
-
-2. GET THRUSTER STATE:
-   
-   state = thrController.getThrusterState()
-   # Returns: {
-   #   'ch4_mass': current CH4 mass (kg),
-   #   'lox_mass': current LOX mass (kg),
-   #   'total_fuel_mass': total propellant (kg),
-   #   'gimbal_limit_rad': ±0.1396 rad (±8°),
-   #   'current_gimbal_angles': [[pitch, yaw], ...],
-   #   ...
-   # }
-
-================================================================================
-DIRECT BASILISK ACCESS (if needed)
-================================================================================
-
-3. READ SPACECRAFT STATE (raw):
-   
-   scState = lander.scStateOutMsg.read()
-   # scState.r_BN_N: position [x, y, z] in inertial frame (m)
-   # scState.v_BN_N: velocity [vx, vy, vz] (m/s)
-   # scState.sigma_BN: attitude (MRP)
-   # scState.omega_BN_B: angular velocity (rad/s)
-
-4. READ SENSOR DATA (raw):
-   
-   imuData = imu.sensorOutMsg.read()
-   # imuData.AccelPlatform: measured acceleration (m/s²)
-   # imuData.AngVelPlatform: measured angular velocity (rad/s)
-
-5. TERRAIN QUERIES:
-   
-   height = terrain.get_height(x, y)  # Get terrain height at (x, y)
-
-================================================================================
-SENSOR NOISE MODELS
-================================================================================
-
-IMU Noise:
-- Gyroscope: Gaussian noise, σ = 0.00001 rad/s (space-grade precision)
-- Accelerometer: Gaussian noise, σ = 0.001 m/s² (high precision)
-- Applied by Basilisk's imuSensor module
-
-LIDAR Noise:
-- Range noise: Gaussian, σ = 0.05 m (5 cm standard deviation)
-- Dropout probability: 2% (simulates no-return events)
-- Minimum valid range: 0.5 m (close-range filter)
-- Intensity varies with range and random factor
-
-All noise is stochastic and varies each timestep, providing realistic
-sensor uncertainty for AI training.
-
-================================================================================
-THRUSTER CONFIGURATION
-================================================================================
-- Thrusters 0-2:   Primary Raptors (2,500,000 N each, gimbal capable)
-- Thrusters 3-14:  Mid-body (20,000 N each, attitude control)
-- Thrusters 15-38: RCS (2,000 N each, fine attitude control)
-
-FUEL DEPLETION:
-- Automatic via thrusterStateEffector
-- Mixture ratio O/F=3.6 enforced automatically
-- All thrusters consume from both CH4 and LOX tanks
-
-GIMBAL LIMITS:
-- Primary engines: ±8° (±0.1396 rad) in pitch and yaw
-- Note: Current implementation tracks gimbal for AI but doesn't
-  physically actuate. For full gimbal physics, would need additional
-  hingedRigidBodyStateEffector modules.
-
-EXAMPLE AI CONTROL LOOP:
-```python
-# Initialize simulation
-aiSensors.reset()  # Clear sensor history
-aiSensors.set_target_state(position=[0, 0, 0], velocity=[0, 0, 0])
-
-for step in range(num_steps):
-    # Get comprehensive sensor observations
-    obs = aiSensors.update()
+    # Create simulation base class
+    scSim = SimulationBaseClass.SimBaseClass()
     
-    # AI agent processes observations
-    # All critical data available:
-    altitude = obs['altitude_terrain']  # Height above local terrain
-    velocity = obs['velocity_body']     # Velocity in body frame
-    attitude_error = obs['attitude_error_quaternion']
-    fuel_remaining = obs['fuel_fraction']
-    lidar_cloud = obs['lidar_point_cloud']  # Full 3D point cloud
-    imu_history = obs['imu_accel_history']  # Temporal data for filters
+    # Create process and tasks
+    simProcessName = "simProcess"
+    dynTaskName = "dynTask"
+    fswTaskName = "fswTask"
     
-    # AI policy computes actions
-    throttles_primary = ai_policy.compute_primary(obs)
-    throttles_rcs = ai_policy.compute_rcs(obs)
-    gimbal = ai_policy.compute_gimbal(obs)
+    dynProcess = scSim.CreateNewProcess(simProcessName)
+    simulationTimeStep = macros.sec2nano(0.1)  # 0.1 second timestep
+    fswTimeStep = macros.sec2nano(0.5)         # FSW runs at 2 Hz
     
-    # Apply commands to thrusters
-    thrController.setThrusterCommands(
-        primaryThrottles=throttles_primary,
-        rcsThrottles=throttles_rcs,
-        gimbalAngles=gimbal
+    dynProcess.addTask(scSim.CreateNewTask(dynTaskName, simulationTimeStep))
+    dynProcess.addTask(scSim.CreateNewTask(fswTaskName, fswTimeStep))
+    
+    # ----------------------------------------------------------------------
+    # 2. Create Spacecraft - Starship HLS Configuration
+    # ----------------------------------------------------------------------
+    
+    lander = spacecraft.Spacecraft()
+    lander.ModelTag = "Starship_HLS"
+    lander.hub.mHub = SC.HUB_MASS
+    lander.hub.r_BcB_B = SC.CENTER_OF_MASS_OFFSET
+    lander.hub.IHubPntBc_B = SC.INERTIA_TENSOR_FULL
+    lander.hub.r_CN_NInit = np.array([0., 0., 1500.0])   # 1500 m altitude above Moon surface
+    lander.hub.v_CN_NInit = np.array([0., 0., -10.0])    # descending at 10 m/s
+    lander.hub.sigma_BNInit = np.array([0., 0., 0.])     # no initial attitude
+    lander.hub.omega_BN_BInit = np.zeros(3)              # no rotation
+    
+    scSim.AddModelToTask(dynTaskName, lander)
+    
+    # ----------------------------------------------------------------------
+    # 2a. Add Propellant Tanks - CH4 and LOX
+    # ----------------------------------------------------------------------
+    
+    # CH4 Tank (Methane)
+    ch4Tank = fuelTank.FuelTank()
+    ch4Tank.ModelTag = "CH4_Tank"
+    ch4TankModel = fuelTank.FuelTankModelConstantVolume()
+    ch4TankModel.propMassInit = SC.CH4_INITIAL_MASS
+    ch4TankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
+    ch4TankModel.radiusTankInit = SC.CH4_TANK_RADIUS
+    ch4Tank.setTankModel(ch4TankModel)
+    ch4Tank.r_TB_B = SC.CH4_TANK_POSITION
+    ch4Tank.nameOfMassState = "ch4TankMass"
+    lander.addStateEffector(ch4Tank)
+    scSim.AddModelToTask(dynTaskName, ch4Tank)
+    
+    # LOX Tank (Liquid Oxygen)
+    loxTank = fuelTank.FuelTank()
+    loxTank.ModelTag = "LOX_Tank"
+    loxTankModel = fuelTank.FuelTankModelConstantVolume()
+    loxTankModel.propMassInit = SC.LOX_INITIAL_MASS
+    loxTankModel.r_TcT_TInit = [[0.0], [0.0], [0.0]]
+    loxTankModel.radiusTankInit = SC.LOX_TANK_RADIUS
+    loxTank.setTankModel(loxTankModel)
+    loxTank.r_TB_B = SC.LOX_TANK_POSITION
+    loxTank.nameOfMassState = "loxTankMass"
+    lander.addStateEffector(loxTank)
+    scSim.AddModelToTask(dynTaskName, loxTank)
+    
+    # ----------------------------------------------------------------------
+    # 3. Setup Gravity
+    # ----------------------------------------------------------------------
+    gravFactory = simIncludeGravBody.gravBodyFactory()
+    moon = gravFactory.createMoon()
+    moon.isCentralBody = True
+    gravFactory.addBodiesTo(lander)
+    
+    # ----------------------------------------------------------------------
+    # 3a. Lightweight Analytical Terrain Model
+    # ----------------------------------------------------------------------
+    print("\n" + "="*60)
+    print("INITIALIZING ANALYTICAL TERRAIN SYSTEM")
+    print("="*60)
+    
+    # Create terrain model instance
+    terrain = LunarRegolithModel(size=2000.0, resolution=200)
+    
+    # Try to load terrain from file (if available)
+    terrainDataPath = os.path.join(os.path.dirname(__file__), 'generated_terrain', 'moon_terrain.npy')
+    if not terrain.load_terrain_from_file(terrainDataPath):
+        # Fall back to procedural generation
+        print("  Generating procedural terrain...")
+        terrain.generate_procedural_terrain(num_craters=15, 
+                                            crater_depth_range=(3, 12), 
+                                            crater_radius_range=(15, 60))
+    
+    print("="*60 + "\n")
+    
+    # ----------------------------------------------------------------------
+    # 3b. External Force Effector for Terrain Contact
+    # ----------------------------------------------------------------------
+    terrainForceEff = extForceTorque.ExtForceTorque()
+    terrainForceEff.ModelTag = "TerrainContactForce"
+    scSim.AddModelToTask(dynTaskName, terrainForceEff)
+    lander.addDynamicEffector(terrainForceEff)
+    
+    # ----------------------------------------------------------------------
+    # 3c. Setup Aerodynamics (minimal effect on Moon)
+    # ----------------------------------------------------------------------
+    dragEffector = dragDynamicEffector.DragDynamicEffector()
+    dragEffector.ModelTag = "DragEffector"
+    dragEffector.coreParams.projectedArea = 63.617  # m² (π × radius²)
+    dragEffector.coreParams.dragCoeff = 0.6
+    dragEffector.coreParams.comOffset = [0.0, 0.0, 0.0]
+    
+    lander.addDynamicEffector(dragEffector)
+    scSim.AddModelToTask(dynTaskName, dragEffector)
+    
+    # Moon exosphere model
+    moonAtmo = exponentialAtmosphere.ExponentialAtmosphere()
+    moonAtmo.ModelTag = "MoonAtmosphere"
+    moonAtmo.planetRadius = moon.radEquator
+    moonAtmo.scaleHeight = 100000.0  # m (arbitrary large value)
+    moonAtmo.baseDensity = 1e-15  # kg/m³ (Moon's exosphere density)
+    moonAtmo.envMinReach = -10000.0
+    moonAtmo.envMaxReach = 10000.0
+    moonAtmo.addSpacecraftToModel(lander.scStateOutMsg)
+    scSim.AddModelToTask(dynTaskName, moonAtmo)
+    
+    dragEffector.atmoDensInMsg.subscribeTo(moonAtmo.envOutMsgs[0])
+    
+    # ----------------------------------------------------------------------
+    # 4. Add Thrusters - Starship HLS Configuration
+    # ----------------------------------------------------------------------
+    
+    # Create separate thruster state effectors for each group
+    primaryEff = thrusterStateEffector.ThrusterStateEffector()
+    primaryEff.ModelTag = "PrimaryThrusters"
+    scSim.AddModelToTask(dynTaskName, primaryEff)
+    lander.addStateEffector(primaryEff)
+    
+    midbodyEff = thrusterStateEffector.ThrusterStateEffector()
+    midbodyEff.ModelTag = "MidBodyThrusters"
+    scSim.AddModelToTask(dynTaskName, midbodyEff)
+    lander.addStateEffector(midbodyEff)
+    
+    rcsEff = thrusterStateEffector.ThrusterStateEffector()
+    rcsEff.ModelTag = "RCSThrusters"
+    scSim.AddModelToTask(dynTaskName, rcsEff)
+    lander.addStateEffector(rcsEff)
+    
+    # PRIMARY AFT ENGINES (3 Vacuum Raptors with gimbal)
+    print(f"\nPrimary Engine Fuel Consumption (per engine @ 100%):")
+    print(f"  Total mass flow: {SC.PER_ENGINE_MASS_FLOW:.2f} kg/s")
+    print(f"  CH4 flow: {SC.CH4_FLOW_PER_ENGINE:.2f} kg/s")
+    print(f"  LOX flow: {SC.LOX_FLOW_PER_ENGINE:.2f} kg/s")
+    
+    for pos in SC.PRIMARY_ENGINE_POSITIONS:
+        thrConfig = thrusterStateEffector.THRSimConfig()
+        thrConfig.thrLoc_B = np.array(pos, dtype=float)
+        thrConfig.thrDir_B = SC.PRIMARY_ENGINE_DIRECTION
+        thrConfig.MaxThrust = SC.MAX_THRUST_PER_ENGINE
+        thrConfig.steadyIsp = SC.VACUUM_ISP
+        primaryEff.addThruster(thrConfig, lander.scStateOutMsg)
+    
+    # MID-BODY THRUSTERS (12 thrusters for attitude control)
+    for pos in SC.MIDBODY_THRUSTER_POSITIONS:
+        direction = SC.get_midbody_thruster_direction(pos)
+        thrConfig = thrusterStateEffector.THRSimConfig()
+        thrConfig.thrLoc_B = np.array(pos, dtype=float)
+        thrConfig.thrDir_B = np.array(direction, dtype=float)
+        thrConfig.MaxThrust = SC.MIDBODY_THRUST
+        thrConfig.steadyIsp = SC.VACUUM_ISP
+        midbodyEff.addThruster(thrConfig, lander.scStateOutMsg)
+    
+    # RCS THRUSTERS (24 thrusters: 12 at top ring, 12 at bottom ring)
+    for pos in SC.RCS_THRUSTER_POSITIONS:
+        direction = SC.get_rcs_thruster_direction(pos)
+        thrConfig = thrusterStateEffector.THRSimConfig()
+        thrConfig.thrLoc_B = np.array(pos, dtype=float)
+        thrConfig.thrDir_B = np.array(direction, dtype=float)
+        thrConfig.MaxThrust = SC.RCS_THRUST
+        thrConfig.steadyIsp = SC.VACUUM_ISP
+        rcsEff.addThruster(thrConfig, lander.scStateOutMsg)
+    
+    # Connect fuel tanks to thruster effectors
+    ch4Tank.addThrusterSet(primaryEff)
+    ch4Tank.addThrusterSet(midbodyEff)
+    ch4Tank.addThrusterSet(rcsEff)
+    
+    loxTank.addThrusterSet(primaryEff)
+    loxTank.addThrusterSet(midbodyEff)
+    loxTank.addThrusterSet(rcsEff)
+    
+    # Print thruster configuration summary
+    print(f"\nThruster Configuration (thrusterStateEffector):")
+    print(f"  - {SC.PRIMARY_ENGINE_COUNT} Primary Raptor engines (2,500,000 N each, gimbal capable)")
+    print(f"  - {SC.MIDBODY_THRUSTER_COUNT} Mid-body thrusters (20,000 N each)")
+    print(f"  - {SC.RCS_THRUSTER_COUNT} RCS thrusters (2,000 N each)")
+    print(f"  - Total: {SC.TOTAL_THRUSTER_COUNT} thrusters")
+    print(f"  - Split into 3 effectors (MAX_EFF_CNT=36 limit)")
+    print(f"  - All thrusters connected to fuel tanks for automatic depletion")
+    
+    # ----------------------------------------------------------------------
+    # 5. Add IMU Sensor
+    # ----------------------------------------------------------------------
+    imu = imuSensor.ImuSensor()
+    imu.ModelTag = "StarshipIMU"
+    imu.setBodyToPlatformDCM(0.0, 0.0, 0.0)
+    imu.scStateInMsg.subscribeTo(lander.scStateOutMsg)
+    imu.setErrorBoundsGyro([0.00001] * 3)   # Very low gyro noise
+    imu.setErrorBoundsAccel([0.001] * 3)    # Low accelerometer noise
+    scSim.AddModelToTask(dynTaskName, imu)
+    
+    # ----------------------------------------------------------------------
+    # 5a. LIDAR Sensor
+    # ----------------------------------------------------------------------
+    lidar = LIDARSensor(terrain, max_range=150.0, cone_angle=45.0, num_rays=64)
+    
+    print("="*60 + "\n")
+    
+    # ----------------------------------------------------------------------
+    # 6. AI Sensor Suite
+    # ----------------------------------------------------------------------
+    aiSensors = AISensorSuite(
+        scObject=lander,
+        imu=imu,
+        terrain=terrain,
+        lidar=lidar,
+        ch4Tank=ch4Tank,
+        loxTank=loxTank,
+        history_length=10
     )
     
-    # Step simulation
-    scSim.ConfigureStopTime(macros.sec2nano((step + 1) * dt))
-    scSim.ExecuteSimulation()
+    # Set landing target
+    aiSensors.set_target_state(
+        position=[0.0, 0.0, 0.0],
+        velocity=[0.0, 0.0, 0.0],
+        quaternion=[0.0, 0.0, 0.0, 1.0]
+    )
     
-    # Check terminal conditions
-    if altitude < 0.5 and abs(obs['vertical_velocity']) < 0.1:
-        print("Successful landing!")
-        break
-    elif altitude < 0 and abs(obs['vertical_velocity']) > 2.0:
-        print("Crash landing!")
-        break
-```
+    print(f"\nAI Sensor Suite Ready:")
+    print(f"  Observation space size: {aiSensors.get_observation_space_size()} dimensions")
+    
+    # ----------------------------------------------------------------------
+    # 6a. Advanced Thruster Controller
+    # ----------------------------------------------------------------------
+    thrController = AdvancedThrusterController(
+        primaryEff, midbodyEff, rcsEff, ch4Tank, loxTank, terrain, terrainForceEff, lander
+    )
+    
+    # Connect thruster effectors to controller messages
+    primaryEff.cmdsInMsg.subscribeTo(thrController.primCmdMsg)
+    midbodyEff.cmdsInMsg.subscribeTo(thrController.midCmdMsg)
+    rcsEff.cmdsInMsg.subscribeTo(thrController.rcsCmdMsg)
+    
+    # Connect terrain force effector to controller's terrain force message
+    terrainForceEff.cmdForceBodyInMsg.subscribeTo(thrController.terrainForceMsg)
+    
+    # ----------------------------------------------------------------------
+    # 7. Setup Data Logging
+    # ----------------------------------------------------------------------
+    simulationTime = macros.sec2nano(60.0)  # 60 seconds
+    numDataPoints = 600
+    
+    samplingTime = unitTestSupport.samplingTime(simulationTime, simulationTimeStep, numDataPoints)
+    
+    # Log spacecraft state
+    scLog = lander.scStateOutMsg.recorder(samplingTime)
+    scSim.AddModelToTask(dynTaskName, scLog)
+    
+    # Log IMU data
+    imuLog = imu.sensorOutMsg.recorder(samplingTime)
+    scSim.AddModelToTask(dynTaskName, imuLog)
+    
+    # Log thruster data
+    primThrLog = primaryEff.thrusterOutMsgs[0].recorder(samplingTime)
+    scSim.AddModelToTask(dynTaskName, primThrLog)
+    
+    # Log fuel tank masses
+    ch4TankLog = ch4Tank.fuelTankOutMsg.recorder(samplingTime)
+    scSim.AddModelToTask(dynTaskName, ch4TankLog)
+    
+    loxTankLog = loxTank.fuelTankOutMsg.recorder(samplingTime)
+    scSim.AddModelToTask(dynTaskName, loxTankLog)
+    
+    # ----------------------------------------------------------------------
+    # 8. Execute Simulation
+    # ----------------------------------------------------------------------
+    scSim.InitializeSimulation()
+    scSim.ConfigureStopTime(simulationTime)
+    
+    print("\n" + "="*60)
+    print("STARTING SIMULATION")
+    print("="*60)
+    print(f"Duration: {simulationTime * macros.NANO2SEC} seconds")
+    print(f"Time step: {simulationTimeStep * macros.NANO2SEC} seconds")
+    print("Terrain: Analytical regolith model (high performance)")
+    print("Sensors: IMU, LIDAR, Altimeter, Fuel, Attitude (all with noise)")
+    print("="*60 + "\n")
+    
+    # Test AI sensor suite during simulation
+    print("Testing AI Sensor Suite (first 5 seconds)...\n")
+    
+    # Execute simulation with periodic sensor readouts
+    current_time = 0.0
+    step_count = 0
+    sensor_read_interval = 0.5  # Read sensors every 0.5 seconds for demo
+    
+    scSim.InitializeSimulation()
+    
+    while current_time < simulationTime * macros.NANO2SEC:
+        # Update thruster controller (default hover test commands)
+        currentTimeNano = macros.sec2nano(current_time)
+        thrController.Update(currentTimeNano)
+        
+        # Step simulation
+        scSim.ConfigureStopTime(macros.sec2nano(current_time + 0.1))
+        scSim.ExecuteSimulation()
+        
+        current_time += 0.1
+        step_count += 1
+        
+        # Read AI sensors periodically
+        if step_count % int(sensor_read_interval / 0.1) == 0 and current_time <= 5.0:
+            obs = aiSensors.update()
+            
+            print(f"\n--- Sensor Reading at t={current_time:.1f}s ---")
+            print(f"Altitude (terrain-relative): {obs['altitude_terrain']:.2f} m")
+            print(f"Vertical velocity: {obs['vertical_velocity']:.2f} m/s")
+            print(f"Horizontal speed: {obs['horizontal_speed']:.2f} m/s")
+            print(f"Attitude error angle: {np.degrees(obs['attitude_error_angle']):.2f}°")
+            print(f"Fuel remaining: {obs['fuel_fraction']*100:.1f}% ({obs['fuel_mass']:.0f} kg)")
+            print(f"IMU accel (body): [{obs['imu_accel_current'][0]:.3f}, {obs['imu_accel_current'][1]:.3f}, {obs['imu_accel_current'][2]:.3f}] m/s²")
+            print(f"IMU gyro (body): [{obs['imu_gyro_current'][0]:.4f}, {obs['imu_gyro_current'][1]:.4f}, {obs['imu_gyro_current'][2]:.4f}] rad/s")
+            print(f"LIDAR: min_range={obs['lidar_min_range']:.1f}m, mean={obs['lidar_mean_range']:.1f}m, valid_returns={np.sum(obs['lidar_ranges']>0)}/{len(obs['lidar_ranges'])}")
+    
+    print("\n" + "="*60)
+    print("SIMULATION COMPLETED")
+    print("="*60 + "\n")
+    
+    return scSim, lander, aiSensors, thrController
 
-OBSERVATION SPACE SUMMARY:
-- Total dimensions: ~200+ (use aiSensors.get_observation_space_size())
-- IMU history: 10 frames × 6 values (accel + gyro) = 60 dims
-- LIDAR: 64 rays × 2 (range + intensity) = 128 dims
-- State: ~20-30 dims (position, velocity, attitude, fuel)
-- All data includes realistic sensor noise for robust AI training
 
-For neural network inputs, use:
-  obs_vector = aiSensors.get_flattened_observation()
-  # Returns 1D numpy array ready for NN input
-"""
+# ======================================================================
+# STANDALONE EXECUTION
+# ======================================================================
+
+if __name__ == "__main__":
+    """
+    Run standalone simulation when executed directly.
+    When imported as a module, only classes are exposed.
+    """
+    run()
