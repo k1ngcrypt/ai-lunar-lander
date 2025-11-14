@@ -23,6 +23,8 @@ import gymnasium as gym
 from gymnasium import spaces
 import warnings
 import os
+import sys
+import io
 
 # Suppress Basilisk SWIG memory leak warnings (cosmetic only, not actual leaks)
 # The BSKLogger warnings are due to SWIG not finding destructors for singleton objects
@@ -30,12 +32,56 @@ import os
 warnings.filterwarnings('ignore', message='.*BSKLogger.*memory leak.*')
 warnings.filterwarnings('ignore', message='swig/python detected a memory leak.*')
 
+# Suppress Basilisk state engine warnings (intentional behavior for optimized reset)
+# These warnings occur when using setState() for fast episode resets
+# This is the recommended approach for performance in RL training
+warnings.filterwarnings('ignore', message='.*You created the dynamic property.*more than once.*')
+warnings.filterwarnings('ignore', message='.*You created a state with the name.*more than once.*')
+
 # Import common utilities
 from common_utils import setup_basilisk_path, quaternion_to_euler
 
 
 # Add Basilisk to path
 setup_basilisk_path()
+
+# Context manager to suppress Basilisk C++ warnings
+class SuppressBasiliskWarnings:
+    """
+    Context manager to suppress BSK_WARNING messages printed directly to stderr
+    by Basilisk's C++ code at the file descriptor level.
+    """
+    def __init__(self):
+        self.original_stderr_fd = None
+        self.saved_stderr_fd = None
+        self.devnull_fd = None
+        
+    def __enter__(self):
+        try:
+            # Save the original stderr file descriptor
+            self.original_stderr_fd = sys.stderr.fileno()
+            self.saved_stderr_fd = os.dup(self.original_stderr_fd)
+            
+            # Redirect stderr to devnull at the file descriptor level
+            self.devnull_fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(self.devnull_fd, self.original_stderr_fd)
+        except Exception:
+            # If file descriptor manipulation fails, fall back to Python-level suppression
+            pass
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if self.saved_stderr_fd is not None:
+                # Restore the original stderr
+                os.dup2(self.saved_stderr_fd, self.original_stderr_fd)
+                os.close(self.saved_stderr_fd)
+            if self.devnull_fd is not None:
+                os.close(self.devnull_fd)
+        except Exception:
+            pass
+        return False
+
 from Basilisk.utilities import macros
 
 # Import Starship HLS configuration constants
@@ -623,10 +669,12 @@ class LunarLanderEnv(gym.Env):
         )
         
         # Initialize simulation (ONLY CALL THIS ONCE!)
-        self.scSim.InitializeSimulation()
-        # Run a tiny warm-up step to ensure all messages are initialized
-        self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
-        self.scSim.ExecuteSimulation()
+        # Suppress BSK_WARNING messages during initialization (intentional behavior)
+        with SuppressBasiliskWarnings():
+            self.scSim.InitializeSimulation()
+            # Run a tiny warm-up step to ensure all messages are initialized
+            self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
+            self.scSim.ExecuteSimulation()
         
         self.scenario_initialized = True
         
@@ -1203,37 +1251,36 @@ class LunarLanderEnv(gym.Env):
             #    - Target position/velocity (static reference)
             # ============================================================
             
-            # Get individual state objects from the dynamics manager
-            # Each state object must be retrieved separately using the hub's nameOfHub* properties
-            posRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubPosition)
-            velRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubVelocity)
-            sigmaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubSigma)
-            omegaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubOmega)
-            
-            # Update spacecraft states using state objects (no re-registration!)
-            posRef.setState(np.array([x, y, z]))
-            velRef.setState(velocity.copy())
-            sigmaRef.setState(attitude_mrp.copy())
-            omegaRef.setState(omega.copy())
-            
-            # Reset fuel tank masses (using constants from starship_constants module)
-            ch4InitMass = SC.CH4_INITIAL_MASS
-            loxInitMass = SC.LOX_INITIAL_MASS
-            
-            # Get fuel tank state objects using the nameOfMassState we set during creation
-            ch4MassRef = self.lander.dynManager.getStateObject(self.ch4Tank.nameOfMassState)
-            loxMassRef = self.lander.dynManager.getStateObject(self.loxTank.nameOfMassState)
-            
-            ch4MassRef.setState(np.array([ch4InitMass]))
-            loxMassRef.setState(np.array([loxInitMass]))
-            
-            # Reset simulation time to 0 AFTER setState
-            self.scSim.TotalSim.CurrentNanos = 0
-            
-            # Call InitializeSimulation AFTER setState to ensure integrator
-            # caches are invalidated with the new state values already in place.
-            # This ensures the first observation reflects the new episode's initial conditions.
-            self.scSim.InitializeSimulation()
+            # Suppress BSK_WARNING messages during state updates (intentional behavior)
+            with SuppressBasiliskWarnings():
+                # Get individual state objects from the dynamics manager
+                # Each state object must be retrieved separately using the hub's nameOfHub* properties
+                posRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubPosition)
+                velRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubVelocity)
+                sigmaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubSigma)
+                omegaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubOmega)
+                
+                # Update spacecraft states using state objects (no re-registration!)
+                posRef.setState(np.array([x, y, z]))
+                velRef.setState(velocity.copy())
+                sigmaRef.setState(attitude_mrp.copy())
+                omegaRef.setState(omega.copy())
+                
+                # Reset fuel tank masses (using constants from starship_constants module)
+                ch4InitMass = SC.CH4_INITIAL_MASS
+                loxInitMass = SC.LOX_INITIAL_MASS
+                
+                # Get fuel tank state objects using the nameOfMassState we set during creation
+                ch4MassRef = self.lander.dynManager.getStateObject(self.ch4Tank.nameOfMassState)
+                loxMassRef = self.lander.dynManager.getStateObject(self.loxTank.nameOfMassState)
+                
+                ch4MassRef.setState(np.array([ch4InitMass]))
+                loxMassRef.setState(np.array([loxInitMass]))
+                
+                # Reset simulation time to 0 AFTER setState
+                # DO NOT call InitializeSimulation() - it re-registers all states!
+                # Instead, manually reset the time counter and let ExecuteSimulation handle propagation
+                self.scSim.TotalSim.CurrentNanos = 0
             
             # Note: Fuel tank internal properties (fuelMass, tankRadius, r_TcT_T) are 
             # managed automatically by the FuelTank effector when we update the state.
@@ -1246,11 +1293,13 @@ class LunarLanderEnv(gym.Env):
         self.aiSensors.reset()
         
         # CRITICAL: Execute one simulation timestep to propagate the new state values
-        # Without this, _get_observation() reads stale sensor data from the previous episode
+        # This updates integrator caches and propagates state changes to sensors
+        # WITHOUT re-registering states (no InitializeSimulation call needed)
         if not self.create_new_sim_on_reset:
-            stop_time = macros.sec2nano(self.dt)  # Run for one timestep
-            self.scSim.ConfigureStopTime(stop_time)
-            self.scSim.ExecuteSimulation()
+            with SuppressBasiliskWarnings():
+                stop_time = macros.sec2nano(self.dt)  # Run for one timestep
+                self.scSim.ConfigureStopTime(stop_time)
+                self.scSim.ExecuteSimulation()
         
         # Get initial observation (now reflects the updated state)
         observation = self._get_observation()
