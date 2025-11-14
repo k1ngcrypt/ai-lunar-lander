@@ -1253,6 +1253,7 @@ class LunarLanderEnv(gym.Env):
             #    ✓ Fuel tank masses (CH4 and LOX)
             #    ✓ Hub mass/inertia auto-updated by fuel tank effectors
             #    ✓ Thruster on-times managed by thruster effectors
+            #    ✓ Spacecraft module Reset() called to clear internal states
             #
             # 2. PYTHON EPISODE STATE:
             #    ✓ Episode counter (incremented)
@@ -1284,14 +1285,23 @@ class LunarLanderEnv(gym.Env):
             
             # Suppress BSK_WARNING messages during state updates (intentional behavior)
             with SuppressBasiliskWarnings():
+                # CRITICAL FIX SEQUENCE (following Basilisk best practices):
+                # 1. Reset simulation time FIRST
+                # 2. Set all state values
+                # 3. Execute one timestep to propagate changes
+                # DO NOT call module Reset() - it re-registers states and causes warnings
+                
+                # Step 1: Reset simulation time to 0
+                self.scSim.TotalSim.CurrentNanos = 0
+                
+                # Step 2: Update all state values via state objects
                 # Get individual state objects from the dynamics manager
-                # Each state object must be retrieved separately using the hub's nameOfHub* properties
                 posRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubPosition)
                 velRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubVelocity)
                 sigmaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubSigma)
                 omegaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubOmega)
                 
-                # Update spacecraft states using state objects (no re-registration!)
+                # Set spacecraft states (position, velocity, attitude, angular velocity)
                 posRef.setState(np.array([x, y, z]))
                 velRef.setState(velocity.copy())
                 sigmaRef.setState(attitude_mrp.copy())
@@ -1307,11 +1317,6 @@ class LunarLanderEnv(gym.Env):
                 
                 ch4MassRef.setState(np.array([ch4InitMass]))
                 loxMassRef.setState(np.array([loxInitMass]))
-                
-                # Reset simulation time to 0 AFTER setState
-                # DO NOT call InitializeSimulation() - it re-registers all states!
-                # Instead, manually reset the time counter and let ExecuteSimulation handle propagation
-                self.scSim.TotalSim.CurrentNanos = 0
             
             # Note: Fuel tank internal properties (fuelMass, tankRadius, r_TcT_T) are 
             # managed automatically by the FuelTank effector when we update the state.
