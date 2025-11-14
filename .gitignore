@@ -7,3 +7,4 @@ __pycache__/
 logs/
 models/
 !basilisk/build_basilisk.bat
+vizard/
