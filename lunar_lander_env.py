@@ -38,6 +38,7 @@ warnings.filterwarnings('ignore', message='swig/python detected a memory leak.*'
 warnings.filterwarnings('ignore', message='.*You created the dynamic property.*more than once.*')
 warnings.filterwarnings('ignore', message='.*You created a state with the name.*more than once.*')
 
+import os
 # Import common utilities
 from common_utils import setup_basilisk_path, quaternion_to_euler
 
