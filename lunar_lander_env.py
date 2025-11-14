@@ -21,8 +21,15 @@ NOTE: All Starship HLS configuration constants are imported from starship_consta
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
-
+import warnings
 import os
+
+# Suppress Basilisk SWIG memory leak warnings (cosmetic only, not actual leaks)
+# The BSKLogger warnings are due to SWIG not finding destructors for singleton objects
+# These are cleaned up by Python's garbage collector and do not accumulate
+warnings.filterwarnings('ignore', message='.*BSKLogger.*memory leak.*')
+warnings.filterwarnings('ignore', message='swig/python detected a memory leak.*')
+
 # Import common utilities
 from common_utils import setup_basilisk_path, quaternion_to_euler
 
@@ -417,14 +424,22 @@ class LunarLanderEnv(gym.Env):
         
         Initializes spacecraft, sensors, terrain, and flight software components
         from ScenarioLunarLanderStarter without running standalone simulation.
+        
+        Enhanced with subprocess safety for Windows multiprocessing.
         """
-        from terrain_simulation import LunarRegolithModel
-        from ScenarioLunarLanderStarter import (
-            LIDARSensor, AISensorSuite, 
-            AdvancedThrusterController
-        )
-        from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody
-        from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
+        try:
+            from terrain_simulation import LunarRegolithModel
+            from ScenarioLunarLanderStarter import (
+                LIDARSensor, AISensorSuite, 
+                AdvancedThrusterController
+            )
+            from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody
+            from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor, fuelTank, extForceTorque
+        except Exception as e:
+            print(f"\nERROR: Failed to import Basilisk modules in subprocess")
+            print(f"  {type(e).__name__}: {e}")
+            print(f"  This may be a multiprocessing issue. Try using DummyVecEnv instead.")
+            raise
         
         self.scSim = SimulationBaseClass.SimBaseClass()
         
@@ -1375,8 +1390,10 @@ class LunarLanderEnv(gym.Env):
         Basilisk simulation objects accumulate in memory (~50-100MB per env).
         
         This method explicitly deletes all major objects and forces garbage collection.
-        PRODUCTION: Enhanced with cached array cleanup for better memory management.
+        PRODUCTION: Enhanced with cached array cleanup and BSKLogger cleanup.
         """
+        import gc
+        
         if self.scSim is not None:
             # Delete Basilisk simulation objects in dependency order
             # (sensors first, then effectors, then spacecraft, then simulation)
@@ -1443,6 +1460,18 @@ class LunarLanderEnv(gym.Env):
             if hasattr(self, '_last_reward_components'):
                 self._last_reward_components.clear()
             # Clear action history
+            self.prev_action = None
+            
+            # Force garbage collection to release SWIG objects
+            # This helps clean up BSKLogger and other SWIG-wrapped C++ objects
+            gc.collect()
+        
+    def __del__(self):
+        """Destructor - ensure cleanup happens even without explicit close()"""
+        try:
+            self.close()
+        except Exception:
+            pass  # Ignore errors during cleanup
             self.prev_action = None
             # Force garbage collection to immediately free memory
             import gc

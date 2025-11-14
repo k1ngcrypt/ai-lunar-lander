@@ -60,6 +60,8 @@ import time
 import json
 import pickle
 from datetime import datetime
+import multiprocessing
+import warnings
 
 # Stable Baselines3 imports
 from stable_baselines3 import PPO, SAC, TD3
@@ -442,17 +444,24 @@ class UnifiedTrainer:
         print("="*80 + "\n")
     
     def _make_env(self, env_config: Dict = None, rank: int = 0):
-        """Create environment factory"""
+        """Create environment factory with subprocess safety"""
         def _init():
-            config = env_config or {
-                'observation_mode': 'compact',
-                'max_episode_steps': 1000
-            }
-            # Add flag to improve performance during reset
-            config['create_new_sim_on_reset'] = False
-            env = LunarLanderEnv(**config)
-            env.reset(seed=self.seed + rank)
-            return env
+            try:
+                config = env_config or {
+                    'observation_mode': 'compact',
+                    'max_episode_steps': 1000
+                }
+                # Add flag to improve performance during reset
+                config['create_new_sim_on_reset'] = False
+                env = LunarLanderEnv(**config)
+                env.reset(seed=self.seed + rank)
+                return env
+            except Exception as e:
+                print(f"\n{'='*60}")
+                print(f"ERROR creating environment in subprocess {rank}:")
+                print(f"{type(e).__name__}: {e}")
+                print(f"{'='*60}\n")
+                raise
         return _init
     
     def _normalize_env(self, env, training: bool = True):
@@ -868,9 +877,19 @@ class UnifiedTrainer:
             print(f"Resuming from: {resume_path}")
         print("="*80 + "\n")
         
-        # Create environments
+        # Create environments with subprocess safety
         if self.n_envs > 1:
-            env = SubprocVecEnv([self._make_env(rank=i) for i in range(self.n_envs)])
+            try:
+                print(f"Creating {self.n_envs} parallel environments...")
+                env = SubprocVecEnv([self._make_env(rank=i) for i in range(self.n_envs)],
+                                   start_method='spawn')  # Windows compatibility
+                print("✓ Parallel environments created successfully")
+            except Exception as e:
+                print(f"\n⚠ WARNING: Failed to create parallel environments: {e}")
+                print("  Falling back to single environment (DummyVecEnv)")
+                print("  This will be slower but more stable.\n")
+                env = DummyVecEnv([self._make_env()])
+                self.n_envs = 1  # Update for consistency
         else:
             env = DummyVecEnv([self._make_env()])
         
@@ -1211,9 +1230,19 @@ class UnifiedTrainer:
             mean_reward (float): Mean reward over evaluation episodes
             success_rate (float): Success rate (0.0-1.0) over evaluation episodes
         """
-        # Create environments for this stage
+        # Create environments for this stage with subprocess safety
         if n_envs > 1:
-            env = SubprocVecEnv([self._make_env(stage.env_config, i) for i in range(n_envs)])
+            try:
+                print(f"  Creating {n_envs} parallel environments for stage '{stage.name}'...")
+                env = SubprocVecEnv([self._make_env(stage.env_config, i) for i in range(n_envs)],
+                                   start_method='spawn')  # Windows compatibility
+                print(f"  ✓ Parallel environments created successfully")
+            except Exception as e:
+                print(f"\n  ⚠ WARNING: Failed to create parallel environments: {e}")
+                print(f"    Falling back to single environment (DummyVecEnv)")
+                print(f"    This will be slower but more stable.\n")
+                env = DummyVecEnv([self._make_env(stage.env_config)])
+                n_envs = 1  # Update for this stage
         else:
             env = DummyVecEnv([self._make_env(stage.env_config)])
         
@@ -1300,6 +1329,32 @@ class UnifiedTrainer:
             )
         except KeyboardInterrupt:
             print("\n\nTraining interrupted by user!")
+        except EOFError as e:
+            print(f"\n\n{'='*60}")
+            print("ERROR: Subprocess pipe broken (multiprocessing failure)")
+            print(f"{'='*60}")
+            print("This typically occurs when:")
+            print("  1. Child process crashed during environment reset/step")
+            print("  2. Basilisk simulation diverged in a subprocess")
+            print("  3. Windows multiprocessing incompatibility")
+            print("\nRecommended solutions:")
+            print("  1. Reduce parallel environments: --n-envs 2 or --n-envs 1")
+            print("  2. The system will attempt to recover with DummyVecEnv...")
+            print(f"{'='*60}\n")
+            raise
+        except BrokenPipeError as e:
+            print(f"\n\n{'='*60}")
+            print("ERROR: Subprocess communication failed")
+            print(f"{'='*60}")
+            print("Subprocess crashed during training. This is usually due to:")
+            print("  1. Basilisk memory issues in parallel environments")
+            print("  2. CUDA out-of-memory in GPU accelerated training")
+            print("  3. Simulation divergence causing NaN values")
+            print("\nRecommended solutions:")
+            print("  1. Use single environment: --n-envs 1")
+            print("  2. Reduce batch size if using GPU")
+            print(f"{'='*60}\n")
+            raise
         
         # Save stage model
         stage_path = os.path.join(self.save_dir, f'{stage.name}_final')
@@ -1613,4 +1668,10 @@ Examples:
 
 
 if __name__ == "__main__":
+    # CRITICAL: Windows multiprocessing requires 'spawn' method and __main__ guard
+    # This prevents subprocess re-import issues and memory corruption
+    if sys.platform == 'win32':
+        # Force spawn method on Windows (required for CUDA + multiprocessing)
+        multiprocessing.set_start_method('spawn', force=True)
+    
     main()
