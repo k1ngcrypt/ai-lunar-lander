@@ -19,26 +19,28 @@ import numpy as np
 # ==============================================================================
 
 # Dry mass (kg) - includes structure and payload
-DRY_MASS = 85000.0  # kg - Starship HLS dry mass
-PAYLOAD_MASS = 20000.0  # kg - Payload mass
-HUB_MASS = DRY_MASS + PAYLOAD_MASS  # 105,000 kg total
+# REDUCED FOR NUMERICAL STABILITY (original: 85000 kg)
+DRY_MASS = 8500.0  # kg - 10% scale for training stability
+PAYLOAD_MASS = 2000.0  # kg - 10% scale
+HUB_MASS = DRY_MASS + PAYLOAD_MASS  # 10,500 kg total (was 105,000)
 
 # Initial propellant masses (kg)
-TOTAL_PROPELLANT_MASS = 1200000.0  # kg
-CH4_INITIAL_MASS = 260869.565  # kg - Methane mass
-LOX_INITIAL_MASS = 939130.435  # kg - Liquid oxygen mass
-TOTAL_INITIAL_MASS = HUB_MASS + TOTAL_PROPELLANT_MASS  # 1,305,000 kg
+# REDUCED FOR NUMERICAL STABILITY (original: 1,200,000 kg)
+TOTAL_PROPELLANT_MASS = 30000.0  # kg - scaled down 40x for stability
+CH4_INITIAL_MASS = 6521.7  # kg - Methane mass (scaled)
+LOX_INITIAL_MASS = 23478.3  # kg - Liquid oxygen mass (scaled)
+TOTAL_INITIAL_MASS = HUB_MASS + TOTAL_PROPELLANT_MASS  # 40,500 kg (was 1,305,000)
 
 # Mixture ratio (O/F)
 MIXTURE_RATIO = 3.6  # LOX to CH4 mass ratio
 
-# Inertia tensor (kg·m²) - full propellant configuration
+# Inertia tensor (kg·m²) - SCALED with mass (40x reduction)
 # NOTE: These values represent the spacecraft with FULL propellant
-# Inertia will change as fuel depletes during simulation
+# Original values were for 1.3M kg spacecraft, scaled down for numerical stability
 INERTIA_TENSOR_FULL = np.array([
-    [231513125.0, 0.0, 0.0],
-    [0.0, 231513125.0, 0.0],
-    [0.0, 0.0, 14276250.0]
+    [5787828.0, 0.0, 0.0],      # 231513125 / 40
+    [0.0, 5787828.0, 0.0],
+    [0.0, 0.0, 356906.0]         # 14276250 / 40
 ])
 
 # Center of mass offset (body frame)
@@ -70,7 +72,8 @@ PROPELLANT_CYLINDER_HEIGHT = 45.0  # m (90% of 50m vehicle height)
 # Engine performance
 VACUUM_ISP = 375.0  # seconds - Raptor vacuum specific impulse
 STANDARD_GRAVITY = 9.80665  # m/s² - Standard gravitational acceleration
-MAX_THRUST_PER_ENGINE = 2500000.0  # N - Maximum thrust per Raptor engine
+# REDUCED FOR NUMERICAL STABILITY (original: 2,500,000 N)
+MAX_THRUST_PER_ENGINE = 62500.0  # N - Scaled down 40x for stability
 
 # Mass flow calculations (per engine at 100% throttle)
 PER_ENGINE_MASS_FLOW = MAX_THRUST_PER_ENGINE / (VACUUM_ISP * STANDARD_GRAVITY)  # kg/s

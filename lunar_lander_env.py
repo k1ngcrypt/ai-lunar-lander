@@ -144,8 +144,9 @@ class LunarLanderEnv(gym.Env):
                  initial_altitude_range=(18000.0, 22000.0),
                  initial_velocity_range=((-200.0, 200.0), (-200.0, 200.0), (-100.0, -50.0)),
                  terrain_config=None,
-                 create_new_sim_on_reset=False,
-                 delay_sim_creation=False):
+                 create_new_sim_on_reset=True,  # TEMP: Must recreate to fix divergence
+                 delay_sim_creation=False,
+                 verbose=0):
         """
         Initialize Lunar Lander Gymnasium Environment
         
@@ -170,10 +171,12 @@ class LunarLanderEnv(gym.Env):
         self.initial_velocity_range = initial_velocity_range
         self.create_new_sim_on_reset = create_new_sim_on_reset
         self.delay_sim_creation = delay_sim_creation
+        self.verbose = verbose  # Debug output verbosity (0=silent, 1=info, 2=debug)
         
         # Episode tracking
         self.current_step = 0
         self.episode_count = 0
+        self.sim_time = 0.0  # Cumulative simulation time in seconds
         
         # Fuel tracking for flow rate calculation
         self.prev_fuel_mass = None
@@ -202,7 +205,7 @@ class LunarLanderEnv(gym.Env):
         self._last_reward_components = {}
         
         # Simulation parameters
-        self.dt = 0.1  # Simulation timestep (seconds)
+        self.dt = 0.01  # Simulation timestep (seconds) - reduced for numerical stability
         
         # Terrain configuration
         if terrain_config is None:
@@ -515,7 +518,7 @@ class LunarLanderEnv(gym.Env):
         fswTaskName = "fswTask"
         
         dynProcess = self.scSim.CreateNewProcess(simProcessName)
-        simulationTimeStep = macros.sec2nano(self.dt)  # 0.1s dynamics timestep
+        simulationTimeStep = macros.sec2nano(self.dt)  # Dynamics timestep
         fswTimeStep = macros.sec2nano(0.5)  # 0.5s FSW update rate
         
         dynProcess.addTask(self.scSim.CreateNewTask(dynTaskName, simulationTimeStep))
@@ -680,9 +683,11 @@ class LunarLanderEnv(gym.Env):
         # Suppress BSK_WARNING messages during initialization (intentional behavior)
         with SuppressBasiliskWarnings():
             self.scSim.InitializeSimulation()
-            # Run a tiny warm-up step to ensure all messages are initialized
-            self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
-            self.scSim.ExecuteSimulation()
+            # DISABLED: Warmup execution - causes numerical instability
+            # if not hasattr(self, 'first_init_complete'):
+            #     self.scSim.ConfigureStopTime(macros.sec2nano(0.001))
+            #     self.scSim.ExecuteSimulation()
+            #     self.first_init_complete = True
         
         self.scenario_initialized = True
         
@@ -700,6 +705,9 @@ class LunarLanderEnv(gym.Env):
             current_fuel_mass = obs_dict['fuel_mass']
             if self.prev_fuel_mass is not None:
                 self.fuel_flow_rate = (self.prev_fuel_mass - current_fuel_mass) / self.dt
+            else:
+                # First step: initialize prev_fuel_mass, keep flow rate at 0
+                self.fuel_flow_rate = 0.0
             self.prev_fuel_mass = current_fuel_mass
             
             # Compute time-to-impact estimate (seconds until ground contact)
@@ -847,15 +855,18 @@ class LunarLanderEnv(gym.Env):
         
         Architecture:
         1. Terminal Rewards (±1000): Episode outcome signals
-        2. Progress Tracking (0-5/step): Continuous guidance
+        2. Progress Tracking (0-10/step): Continuous guidance
+           - Always-active rewards (alive, altitude, velocity, attitude, descent)
+           - Altitude-specific rewards (approach, proximity, stability, final approach)
         3. Safety & Efficiency (±2/step): Warnings and fuel management
         4. Control Quality (±1/step): Smooth operation
         
         Expected Cumulative Rewards:
-        - Perfect landing: 1200-1600
-        - Good landing: 900-1200
-        - Basic landing: 600-900
-        - Crash: -400 to -800
+        - Perfect landing: 1500-2000 (terminal + step rewards over ~200 steps)
+        - Good landing: 1000-1500
+        - Basic landing: 500-1000
+        - Controlled descent (no landing): 100-500
+        - Early crash: -400 to -800
         
         See REWARD_SYSTEM_GUIDE.md for detailed documentation.
         """
@@ -955,7 +966,63 @@ class LunarLanderEnv(gym.Env):
         # 2. PROGRESS TRACKING REWARDS (0-5 scale, continuous guidance)
         # ====================================================================
         
-        # A. Altitude-Velocity Correlation (encourage proper descent profile)
+        # ALWAYS-ACTIVE REWARDS (provide continuous guidance from start)
+        # These rewards help the model learn basic control before attempting landing
+        
+        # A. Staying Alive Bonus (encourage longer episodes)
+        # Small reward per timestep for not crashing - helps early exploration
+        if not terminated:
+            alive_bonus = 0.5
+            reward_components['alive_bonus'] = alive_bonus
+            reward += alive_bonus
+        
+        # B. Altitude Maintenance (discourage immediate crashes)
+        # Reward being at a reasonable altitude (not too high, not crashing)
+        if altitude > 10.0:
+            # Bonus for maintaining altitude in reasonable range
+            if altitude < 500.0:
+                altitude_bonus = 1.0 * (1.0 - abs(altitude - 250.0) / 250.0)
+                reward_components['altitude_maintenance'] = altitude_bonus
+                reward += altitude_bonus
+        
+        # C. Velocity Control (always reward reasonable speeds)
+        # Penalize excessive velocity at any altitude
+        speed_excess = max(0, total_velocity - 20.0)
+        if speed_excess > 0:
+            speed_penalty = -0.5 * min(speed_excess / 20.0, 2.0)
+            reward_components['speed_control'] = speed_penalty
+            reward += speed_penalty
+        else:
+            # Small bonus for maintaining reasonable speed
+            speed_bonus = 0.3 * (1.0 - total_velocity / 20.0)
+            reward_components['speed_control'] = speed_bonus
+            reward += speed_bonus
+        
+        # D. Attitude Control (always reward upright orientation)
+        # This is critical - agent needs to learn to stay upright
+        attitude_deg = np.degrees(attitude_error)
+        if attitude_deg < 30.0:
+            # Strong reward for staying mostly upright
+            attitude_reward = 1.0 * (1.0 - attitude_deg / 30.0)
+            reward_components['attitude_control'] = attitude_reward
+            reward += attitude_reward
+        else:
+            # Penalty for being too tilted
+            attitude_penalty = -0.5 * min((attitude_deg - 30.0) / 30.0, 2.0)
+            reward_components['attitude_control'] = attitude_penalty
+            reward += attitude_penalty
+        
+        # E. Descent Progress (reward moving downward at any altitude)
+        if vertical_vel < 0:  # Moving down
+            # Reward descent but not too fast
+            if abs(vertical_vel) < 15.0:
+                descent_bonus = 0.5 * (abs(vertical_vel) / 15.0)
+                reward_components['descent_progress'] = descent_bonus
+                reward += descent_bonus
+        
+        # ALTITUDE-SPECIFIC REWARDS (refinement as agent improves)
+        
+        # F. Altitude-Velocity Correlation (encourage proper descent profile)
         # Good descent: -2 to -10 m/s vertical velocity proportional to altitude
         if altitude > 10.0:
             target_descent_rate = -2.0 - (altitude / 200.0) * 8.0  # -2 to -10 m/s
@@ -965,7 +1032,7 @@ class LunarLanderEnv(gym.Env):
             reward_components['descent_profile'] = descent_reward
             reward += descent_reward
         
-        # B. Approach Angle Optimization (encourage vertical descent near ground)
+        # G. Approach Angle Optimization (encourage vertical descent near ground)
         if altitude < 100.0:
             # Reward low horizontal velocity relative to vertical velocity
             velocity_ratio = horizontal_speed / max(abs(vertical_vel), 0.1)
@@ -973,21 +1040,21 @@ class LunarLanderEnv(gym.Env):
             reward_components['approach_angle'] = approach_reward
             reward += approach_reward
         
-        # C. Proximity to Target (progressive reward)
+        # H. Proximity to Target (progressive reward)
         if altitude < 200.0:
             proximity_score = 1.0 - min(horizontal_distance / 50.0, 1.0)
             proximity_reward = 1.0 * proximity_score
             reward_components['proximity'] = proximity_reward
             reward += proximity_reward
         
-        # D. Attitude Stability (progressive reward near ground)
+        # I. Attitude Stability (progressive reward near ground)
         if altitude < 100.0:
             attitude_stability = max(0, 1.0 - np.degrees(attitude_error) / 30.0)
             stability_reward = 0.5 * attitude_stability
             reward_components['attitude_stability'] = stability_reward
             reward += stability_reward
         
-        # E. Final Approach Quality (high reward in last 50m)
+        # J. Final Approach Quality (high reward in last 50m)
         if altitude < 50.0:
             # Reward being slow, upright, and on-target
             final_approach_score = (
@@ -1149,6 +1216,7 @@ class LunarLanderEnv(gym.Env):
         # Reset episode tracking
         self.current_step = 0
         self.episode_count += 1
+        self.sim_time = 0.0  # Reset cumulative simulation time
         
         # Reset fuel tracking (prevents fuel flow rate corruption)
         self.prev_fuel_mass = None
@@ -1188,9 +1256,13 @@ class LunarLanderEnv(gym.Env):
         x = self.np_random.uniform(-100.0, 100.0)
         y = self.np_random.uniform(-100.0, 100.0)
         
-        # Get terrain height at (x, y)
+        # Get terrain height at (x, y) - this is relative to reference plane
         terrain_height = self.terrain.get_height(x, y)
-        z = terrain_height + altitude
+        
+        # CRITICAL: Position must be relative to Moon's CENTER, not surface!
+        # Moon radius = 1,737,400 m
+        MOON_RADIUS = 1737400.0
+        z = MOON_RADIUS + terrain_height + altitude  # Full position from Moon center
         
         # Suborbital trajectory velocity (realistic for lunar descent from 20km)
         # Horizontal velocity dominates, with downward component
@@ -1286,21 +1358,27 @@ class LunarLanderEnv(gym.Env):
             
             # Suppress BSK_WARNING messages during state updates (intentional behavior)
             with SuppressBasiliskWarnings():
-                # CRITICAL FIX SEQUENCE (following Basilisk best practices):
-                # 1. Reset simulation time FIRST
-                # 2. Set all state values
-                # 3. Execute one timestep to propagate changes
-                # DO NOT call module Reset() - it re-registers states and causes warnings
+                # CRITICAL FIX SEQUENCE for Basilisk integrator reset:
+                # The integrator caches derivatives which cause divergence if not cleared
+                # 
+                # 1. Set all state values FIRST
+                # 2. Reset simulation time to 0
+                # 3. ConfigureStopTime to 0 nano (clears integrator cache)
+                # 4. ExecuteSimulation (propagates reset)
                 
-                # Step 1: Reset simulation time to 0
-                self.scSim.TotalSim.CurrentNanos = 0
-                
-                # Step 2: Update all state values via state objects
+                # Step 1: Update all state values via state objects
                 # Get individual state objects from the dynamics manager
                 posRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubPosition)
                 velRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubVelocity)
                 sigmaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubSigma)
                 omegaRef = self.lander.dynManager.getStateObject(self.lander.hub.nameOfHubOmega)
+                
+                # CRITICAL: Also update hub's initial condition properties
+                # These are used by the integrator when ExecuteSimulation is called
+                self.lander.hub.r_CN_NInit = np.array([x, y, z])
+                self.lander.hub.v_CN_NInit = velocity.copy()
+                self.lander.hub.sigma_BNInit = attitude_mrp.copy()
+                self.lander.hub.omega_BN_BInit = omega.copy()
                 
                 # Set spacecraft states (position, velocity, attitude, angular velocity)
                 posRef.setState(np.array([x, y, z]))
@@ -1318,6 +1396,9 @@ class LunarLanderEnv(gym.Env):
                 
                 ch4MassRef.setState(np.array([ch4InitMass]))
                 loxMassRef.setState(np.array([loxInitMass]))
+                
+                # Step 2: Reset simulation time to 0 nano (unused in create_new mode)
+                self.scSim.TotalSim.CurrentNanos = 0
             
             # Note: Fuel tank internal properties (fuelMass, tankRadius, r_TcT_T) are 
             # managed automatically by the FuelTank effector when we update the state.
@@ -1328,15 +1409,6 @@ class LunarLanderEnv(gym.Env):
         
         # Reset sensor history
         self.aiSensors.reset()
-        
-        # CRITICAL: Execute one simulation timestep to propagate the new state values
-        # This updates integrator caches and propagates state changes to sensors
-        # WITHOUT re-registering states (no InitializeSimulation call needed)
-        if not self.create_new_sim_on_reset:
-            with SuppressBasiliskWarnings():
-                stop_time = macros.sec2nano(self.dt)  # Run for one timestep
-                self.scSim.ConfigureStopTime(stop_time)
-                self.scSim.ExecuteSimulation()
         
         # Get initial observation (now reflects the updated state)
         observation = self._get_observation()
@@ -1423,17 +1495,22 @@ class LunarLanderEnv(gym.Env):
         )
         
         # Update controller (computes terrain forces, etc.)
-        current_time_nano = macros.sec2nano(self.current_step * self.dt)
+        current_time_nano = macros.sec2nano(self.sim_time)
         self.thrController.Update(current_time_nano)
         
-        # Step simulation
-        stop_time = macros.sec2nano(self.current_step * self.dt)
+        # Step simulation (advance by dt from current sim_time)
+        self.sim_time += self.dt
+        stop_time = macros.sec2nano(self.sim_time)
         self.scSim.ConfigureStopTime(stop_time)
         self.scSim.ExecuteSimulation()
         
         # Get new observation
         observation = self._get_observation()
         obs_dict = self.aiSensors.update()
+        
+        # INTEGRITY CHECK: Verify observation shape (catch corruption early)
+        if observation.shape != (32,):
+            raise ValueError(f"Observation corruption detected! Expected (32,), got {observation.shape}")
         
         # Check termination
         terminated, truncated = self._check_termination(obs_dict)
@@ -1454,6 +1531,15 @@ class LunarLanderEnv(gym.Env):
             'step': self.current_step,
             'reward_components': self._last_reward_components.copy()  # Include reward breakdown
         }
+        
+        # DEBUG: Print reward breakdown every 50 steps (helps diagnose ±0 rewards)
+        if self.current_step % 50 == 0 and self.verbose > 0:
+            total_comp_reward = sum(self._last_reward_components.values())
+            print(f"\n[Step {self.current_step}] Reward breakdown:")
+            print(f"  Total reward: {reward:.2f} (components sum: {total_comp_reward:.2f})")
+            for comp_name, comp_value in sorted(self._last_reward_components.items(), 
+                                                 key=lambda x: abs(x[1]), reverse=True)[:5]:
+                print(f"    {comp_name}: {comp_value:.2f}")
         
         return observation, reward, terminated, truncated, info
     

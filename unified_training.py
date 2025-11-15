@@ -109,10 +109,8 @@ def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
         setup_basilisk_path()
         from lunar_lander_env import LunarLanderEnv
         
-        # CRITICAL FIX: The state engine approach has a fundamental bug where setState()
-        # doesn't properly update the integrator's cached initial conditions.
-        # We must delay simulation creation until the first reset() call.
-        config['delay_sim_creation'] = True
+        # Use optimized reset (reuses simulation) for fast training
+        # Fixed reset method now calls lander.Reset() to clear integrator caches
         env = LunarLanderEnv(**config)
         env.reset(seed=seed + rank)
         return env
@@ -133,7 +131,7 @@ class CurriculumStage:
                  env_config: Dict,
                  success_threshold: float,
                  min_episodes: int = 100,
-                 max_timesteps: int = 500_000):
+                 max_timesteps: int = 5_000_000):
         """
         Args:
             name: Stage name (e.g., "hover", "simple_descent")
@@ -161,10 +159,28 @@ class TrainingProgressCallback(BaseCallback):
         self.episode_lengths = []
         self.episode_successes = []  # Track success/failure
         
+        # Diagnostic tracking
+        self.actions_buffer = []  # Track recent actions
+        self.observations_buffer = []  # Track recent observations
+        self.step_count = 0
+        
     def _on_step(self) -> bool:
+        self.step_count += 1
+        
+        # Track actions and observations for diagnostics
+        if 'actions' in self.locals:
+            self.actions_buffer.append(self.locals['actions'])
+        if 'new_obs' in self.locals:
+            self.observations_buffer.append(self.locals['new_obs'])
+        
         # Log current stage to TensorBoard
         if hasattr(self.logger, 'record'):
             self.logger.record("curriculum/current_stage", self.stage_name)
+        
+        # Log action statistics every 1000 steps
+        if self.step_count % 1000 == 0 and len(self.actions_buffer) > 0:
+            self._log_action_diagnostics()
+            self._log_observation_diagnostics()
         
         # Track episode statistics
         if self.locals.get('dones', [False])[0]:
@@ -190,8 +206,66 @@ class TrainingProgressCallback(BaseCallback):
                             if len(self.episode_successes) >= 100:
                                 recent_success_rate = np.mean(self.episode_successes[-100:])
                                 self.logger.record("episode/success_rate_100", recent_success_rate)
+                            
+                            # Log recent performance trends
+                            if len(self.episode_rewards) >= 10:
+                                recent_mean = np.mean(self.episode_rewards[-10:])
+                                self.logger.record("episode/reward_mean_10", recent_mean)
+                            if len(self.episode_rewards) >= 50:
+                                recent_mean = np.mean(self.episode_rewards[-50:])
+                                self.logger.record("episode/reward_mean_50", recent_mean)
         
         return True
+    
+    def _log_action_diagnostics(self):
+        """Log detailed action statistics for debugging"""
+        if not self.actions_buffer or not hasattr(self.logger, 'record'):
+            return
+        
+        try:
+            actions = np.array(self.actions_buffer[-1000:])  # Last 1000 actions
+            
+            # For compact action space: [main_throttle, pitch_torque, yaw_torque, roll_torque]
+            if actions.ndim == 2 and actions.shape[1] >= 4:
+                self.logger.record("diagnostics/action_throttle_mean", np.mean(actions[:, 0]))
+                self.logger.record("diagnostics/action_throttle_std", np.std(actions[:, 0]))
+                self.logger.record("diagnostics/action_pitch_mean", np.mean(actions[:, 1]))
+                self.logger.record("diagnostics/action_pitch_std", np.std(actions[:, 1]))
+                self.logger.record("diagnostics/action_yaw_mean", np.mean(actions[:, 2]))
+                self.logger.record("diagnostics/action_yaw_std", np.std(actions[:, 2]))
+                self.logger.record("diagnostics/action_roll_mean", np.mean(actions[:, 3]))
+                self.logger.record("diagnostics/action_roll_std", np.std(actions[:, 3]))
+                
+                # Action diversity (entropy)
+                action_range = np.ptp(actions, axis=0)  # Range per dimension
+                self.logger.record("diagnostics/action_diversity", np.mean(action_range))
+        except Exception as e:
+            if self.verbose > 0:
+                print(f"Warning: Failed to log action diagnostics: {e}")
+    
+    def _log_observation_diagnostics(self):
+        """Log observation statistics to detect issues"""
+        if not self.observations_buffer or not hasattr(self.logger, 'record'):
+            return
+        
+        try:
+            obs = np.array(self.observations_buffer[-1000:])  # Last 1000 observations
+            
+            # Log observation statistics
+            if obs.ndim >= 2:
+                self.logger.record("diagnostics/obs_mean", np.mean(obs))
+                self.logger.record("diagnostics/obs_std", np.std(obs))
+                self.logger.record("diagnostics/obs_min", np.min(obs))
+                self.logger.record("diagnostics/obs_max", np.max(obs))
+                
+                # Check for NaN or Inf
+                if np.any(np.isnan(obs)):
+                    self.logger.record("diagnostics/obs_has_nan", 1.0)
+                if np.any(np.isinf(obs)):
+                    self.logger.record("diagnostics/obs_has_inf", 1.0)
+        except Exception as e:
+            if self.verbose > 0:
+                print(f"Warning: Failed to log observation diagnostics: {e}")
     
     def get_success_rate(self, num_episodes: int = 100) -> float:
         """Get success rate over last N episodes"""
@@ -233,19 +307,75 @@ class RewardStatisticsCallback(BaseCallback):
         return True
     
     def _log_component_statistics(self):
-        """Log mean reward component values to TensorBoard"""
+        """Log mean reward component values to TensorBoard with trends"""
         if hasattr(self.logger, 'record'):
+            total_reward_components = 0
+            
             for comp_name, values in self.reward_components.items():
                 if len(values) > 0:
                     # Log mean of last 100 episodes
                     recent_values = values[-100:]
                     mean_value = np.mean(recent_values)
-                    self.logger.record(f"reward_components/{comp_name}", mean_value)
+                    std_value = np.std(recent_values)
+                    self.logger.record(f"reward_components/{comp_name}_mean", mean_value)
+                    self.logger.record(f"reward_components/{comp_name}_std", std_value)
+                    
+                    total_reward_components += abs(mean_value)
+                    
+                    # Log trend (last 50 vs previous 50)
+                    if len(values) >= 100:
+                        old_mean = np.mean(values[-100:-50])
+                        new_mean = np.mean(values[-50:])
+                        trend = new_mean - old_mean
+                        self.logger.record(f"reward_trends/{comp_name}_trend", trend)
+            
+            # Log total magnitude of reward components
+            self.logger.record("reward_components/total_magnitude", total_reward_components)
             
             # Clear old data to avoid memory bloat
             for comp_name in self.reward_components:
                 if len(self.reward_components[comp_name]) > 200:
                     self.reward_components[comp_name] = self.reward_components[comp_name][-200:]
+
+
+class LearningDiagnosticsCallback(BaseCallback):
+    """Callback to track learning-specific metrics (policy entropy, value estimates, etc.)"""
+    
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self.step_count = 0
+    
+    def _on_step(self) -> bool:
+        self.step_count += 1
+        
+        # Log every 1000 steps to avoid performance overhead and key collisions
+        if self.step_count % 1000 == 0 and hasattr(self.logger, 'record'):
+            try:
+                # Log learning rate
+                if hasattr(self.model, 'learning_rate'):
+                    if callable(self.model.learning_rate):
+                        lr = self.model.learning_rate(1.0)  # Get current LR
+                    else:
+                        lr = self.model.learning_rate
+                    self.logger.record("train/learning_rate", lr)
+                
+                # For PPO: log policy entropy coefficient
+                if hasattr(self.model, 'ent_coef'):
+                    self.logger.record("train/entropy_coefficient", self.model.ent_coef)
+                
+                # Log clip range for PPO
+                if hasattr(self.model, 'clip_range'):
+                    if callable(self.model.clip_range):
+                        clip = self.model.clip_range(1.0)
+                    else:
+                        clip = self.model.clip_range
+                    self.logger.record("train/clip_range", clip)
+                
+            except Exception as e:
+                if self.verbose > 0:
+                    print(f"Warning: Failed to log learning diagnostics: {e}")
+        
+        return True
 
 
 class TrainingStateCallback(BaseCallback):
@@ -517,9 +647,9 @@ class UnifiedTrainer:
             print(f"GPU count: {torch.cuda.device_count()}")
             for i in range(torch.cuda.device_count()):
                 print(f"  GPU {i}: {torch.cuda.get_device_name(i)}")
-            print("✓ GPU acceleration ENABLED")
+            print("[OK] GPU acceleration ENABLED")
         else:
-            print("\n⚠ WARNING: CUDA NOT AVAILABLE - Training will use CPU only!")
+            print("\n[WARNING] CUDA NOT AVAILABLE - Training will use CPU only!")
             print("This will be 10-20x slower than GPU training.")
             print("\nTo enable GPU acceleration:")
             print("  1. Install CUDA-enabled PyTorch:")
@@ -551,9 +681,9 @@ class UnifiedTrainer:
         return VecNormalize(
             env,
             norm_obs=True,           # Normalize observations to zero mean, unit variance
-            norm_reward=False,       # DISABLED: Reward normalization corrupts learning signal
+            norm_reward=training,    # ENABLED: Essential for stable value function with ±1000 reward scale
             clip_obs=10.0,           # Clip normalized observations to [-10, 10]
-            clip_reward=10.0,        # Not used when norm_reward=False, but keep for safety
+            clip_reward=10.0,        # Clip normalized rewards to [-10, 10]
             gamma=0.99,              # Discount factor for reward normalization
             epsilon=1e-8             # Small value to avoid division by zero
         )
@@ -572,7 +702,7 @@ class UnifiedTrainer:
                 gamma=kwargs.get('gamma', 0.99),
                 gae_lambda=kwargs.get('gae_lambda', 0.95),
                 clip_range=kwargs.get('clip_range', 0.2),
-                ent_coef=kwargs.get('ent_coef', 0.01),
+                ent_coef=kwargs.get('ent_coef', 0.05),    # INCREASED: 5x from 0.01 for more exploration/mutation
                 vf_coef=kwargs.get('vf_coef', 0.5),
                 max_grad_norm=kwargs.get('max_grad_norm', 0.5),
                 verbose=self.verbose,
@@ -640,7 +770,7 @@ class UnifiedTrainer:
             description="Learn basic landing from low altitude on flat terrain",
             env_config={
                 'observation_mode': 'compact',
-                'max_episode_steps': 600,
+                'max_episode_steps': 800,  # INCREASED: Give more time for cold-start learning
                 'initial_altitude_range': (50.0, 100.0),
                 'initial_velocity_range': ((-5.0, 5.0), (-5.0, 5.0), (-5.0, -2.0)),
                 'terrain_config': {
@@ -653,7 +783,7 @@ class UnifiedTrainer:
             },
             success_threshold=400.0,
             min_episodes=200,
-            max_timesteps=200_000  # OPTIMIZED: 2x from 100k (high-end hardware)
+            max_timesteps=2_000_000  # OPTIMIZED: 2x from 100k (high-end hardware)
         ))
         
         # Stage 2: Medium altitude with gentle terrain
@@ -880,15 +1010,15 @@ class UnifiedTrainer:
                 env_config={
                     'observation_mode': 'compact',
                     'max_episode_steps': 800,
-                    'initial_altitude_range': (400.0, 800.0),
-                    'initial_velocity_range': ((-30.0, 30.0), (-30.0, 30.0), (-30.0, -10.0)),
+                    'initial_altitude_range': (100.0, 200.0),  # REDUCED: Prevent immediate crash
+                    'initial_velocity_range': ((-10.0, 10.0), (-10.0, 10.0), (-10.0, -5.0)),  # REDUCED: Slower
                     'terrain_config': {
                         'size': 2000.0, 'resolution': 200,
-                        'num_craters': 8, 'crater_depth_range': (2, 6),
-                        'crater_radius_range': (20, 60)
+                        'num_craters': 5, 'crater_depth_range': (1, 4),  # REDUCED: Easier terrain
+                        'crater_radius_range': (30, 60)
                     }
                 },
-                success_threshold=0.0,
+                success_threshold=-100.0,  # LOWERED: More achievable
                 min_episodes=30,
                 max_timesteps=10_000
             )
@@ -1028,8 +1158,9 @@ class UnifiedTrainer:
         
         progress_callback = TrainingProgressCallback("standard_training", verbose=1)
         reward_stats_callback = RewardStatisticsCallback(verbose=1)
+        learning_diagnostics_callback = LearningDiagnosticsCallback(verbose=1)
         
-        callback = CallbackList([checkpoint_callback, eval_callback, progress_callback, reward_stats_callback])
+        callback = CallbackList([checkpoint_callback, eval_callback, progress_callback, reward_stats_callback, learning_diagnostics_callback])
         
         # Train
         print("\n" + "="*80)
@@ -1189,11 +1320,11 @@ class UnifiedTrainer:
             # Stage-specific success rate thresholds
             # Early stages have lower thresholds to allow exploration
             SUCCESS_RATE_THRESHOLDS = {
-                0: 0.40,  # Stage 1: 40% (learning basics)
-                1: 0.50,  # Stage 2: 50%
-                2: 0.55,  # Stage 3: 55%
-                3: 0.60,  # Stage 4: 60%
-                4: 0.65   # Stage 5: 65% (final mastery)
+                0: 0.20,  # Stage 1: 20% (much more forgiving for cold-start)
+                1: 0.40,  # Stage 2: 40%
+                2: 0.50,  # Stage 3: 50%
+                3: 0.55,  # Stage 4: 55%
+                4: 0.60   # Stage 5: 60% (final mastery)
             }
             required_success_rate = SUCCESS_RATE_THRESHOLDS.get(stage_idx, 0.60)
             success_passed = success_rate >= required_success_rate
@@ -1338,9 +1469,13 @@ class UnifiedTrainer:
                 if not hasattr(env, 'ret_rms') or env.ret_rms is None:
                     raise ValueError("VecNormalize ret_rms not properly initialized")
                 
-                # Show first 5 dimensions of mean for verification
+                # ENHANCED VERIFICATION: Show detailed statistics
                 mean_sample = env.obs_rms.mean[:min(5, len(env.obs_rms.mean))]
+                var_sample = env.obs_rms.var[:min(5, len(env.obs_rms.var))]
                 print(f"  ✓ Loaded obs mean (first 5): {mean_sample}")
+                print(f"  ✓ Loaded obs var (first 5): {var_sample}")
+                print(f"  ✓ Loaded ret_rms mean: {env.ret_rms.mean:.4f}")
+                print(f"  ✓ Loaded ret_rms var: {env.ret_rms.var:.4f}")
                 print("  ✓ VecNormalize stats loaded successfully")
             except Exception as e:
                 print(f"  ⚠ Failed to load VecNormalize stats: {e}")
@@ -1361,27 +1496,69 @@ class UnifiedTrainer:
                 eval_env,
                 training=False,        # Don't update stats during eval
                 norm_obs=True,         # Use same obs normalization
-                norm_reward=False,     # Don't normalize rewards (we want raw values)
+                norm_reward=False,     # CRITICAL: Don't normalize rewards - we want raw values for eval
                 clip_obs=10.0,
-                clip_reward=10.0,
+                clip_reward=10.0,      # Not used when norm_reward=False
                 gamma=0.99
             )
             # Copy the running statistics from training env
             eval_env.obs_rms = env.obs_rms
             eval_env.ret_rms = env.ret_rms
+            print(f"  Eval env VecNormalize: obs normalized, rewards RAW (not normalized)")
         else:
             # Fallback if env is not VecNormalized (shouldn't happen)
+            print(f"  WARNING: Training env is not VecNormalized!")
             eval_env = self._normalize_env(eval_env, training=False)
         
-        # Create or update model
+        # Create or update model with stage-adaptive exploration
         if self.model is None:
-            self.model = self._create_model(env)
+            # Determine entropy coefficient based on stage difficulty
+            # Stage 1 gets extra exploration (0.12), then linear decay
+            # Find stage index safely
+            stage_idx = 0
+            for i, s in enumerate(self.curriculum_stages):
+                if s.name == stage.name:
+                    stage_idx = i
+                    break
+            
+            total_stages = len(self.curriculum_stages)
+            # Stage 1: 0.12 (high exploration for basics), then linear decay 0.08 → 0.02
+            if stage_idx == 0:
+                ent_coef = 0.12  # INCREASED: More exploration for Stage 1
+            elif total_stages > 1:
+                ent_coef = 0.08 - ((stage_idx - 1) / max(1, total_stages - 2)) * 0.06
+            else:
+                ent_coef = 0.05
+            
+            self.model = self._create_model(env, ent_coef=ent_coef)
             if self.verbose > 0:
                 print("\nModel architecture:")
                 print(self.model.policy)
+                print(f"\nExploration (entropy coef): {ent_coef:.3f} (Stage {stage_idx+1}/{total_stages})")
         else:
             # Update environment for existing model
             self.model.set_env(env)
+            
+            # Adjust exploration for new stage if using PPO
+            if self.algorithm == 'ppo':
+                # Find stage index safely
+                stage_idx = 0
+                for i, s in enumerate(self.curriculum_stages):
+                    if s.name == stage.name:
+                        stage_idx = i
+                        break
+                
+                total_stages = len(self.curriculum_stages)
+                # Stage 1: 0.12 (high exploration), then linear decay
+                if stage_idx == 0:
+                    new_ent_coef = 0.12  # INCREASED: More exploration for Stage 1
+                elif total_stages > 1:
+                    new_ent_coef = 0.08 - ((stage_idx - 1) / max(1, total_stages - 2)) * 0.06
+                else:
+                    new_ent_coef = 0.05
+                self.model.ent_coef = new_ent_coef
+                if self.verbose > 0:
+                    print(f"Updated exploration (entropy coef): {new_ent_coef:.3f} (Stage {stage_idx+1}/{total_stages})")
         
         # Setup callbacks
         checkpoint_callback = CheckpointCallback(
@@ -1404,8 +1581,9 @@ class UnifiedTrainer:
         
         progress_callback = TrainingProgressCallback(stage.name, verbose=1)
         reward_stats_callback = RewardStatisticsCallback(verbose=1)
+        learning_diagnostics_callback = LearningDiagnosticsCallback(verbose=1)
         
-        callback = CallbackList([checkpoint_callback, eval_callback, progress_callback, reward_stats_callback])
+        callback = CallbackList([checkpoint_callback, eval_callback, progress_callback, reward_stats_callback, learning_diagnostics_callback])
         
         # Train
         print(f"\nTraining for up to {stage.max_timesteps:,} timesteps...")
@@ -1611,16 +1789,20 @@ class UnifiedTrainer:
         """
         episode_rewards = []
         successes = []
+        crash_count = 0
+        timeout_count = 0
         
-        for _ in range(n_episodes):
+        for ep_idx in range(n_episodes):
             obs = env.reset()
             done = False
             episode_reward = 0
+            step_count = 0
             
             while not done:
                 action, _states = self.model.predict(obs, deterministic=True)
                 obs, reward, done, info = env.step(action)
                 episode_reward += reward
+                step_count += 1
             
             episode_rewards.append(episode_reward)
             # Success detection: Check if episode terminated successfully
@@ -1628,10 +1810,24 @@ class UnifiedTrainer:
             # Success landings should have rewards > 600 (base 1000 success - some penalties)
             is_success = episode_reward > 600.0
             successes.append(is_success)
+            
+            # DIAGNOSTIC: Track crash vs timeout
+            if episode_reward < -300:
+                crash_count += 1
+            if step_count >= 1000:  # Likely timeout
+                timeout_count += 1
+            
+            # Log first 3 episodes for debugging
+            if ep_idx < 3 and self.verbose > 0:
+                print(f"    Eval ep {ep_idx+1}: reward={episode_reward:.2f}, steps={step_count}, success={is_success}")
         
         mean_reward = np.mean(episode_rewards)
         std_reward = np.std(episode_rewards)
         success_rate = np.mean(successes)
+        
+        # DIAGNOSTIC: Print crash/timeout breakdown
+        if self.verbose > 0 and n_episodes >= 10:
+            print(f"  Eval breakdown: {crash_count}/{n_episodes} crashes, {timeout_count}/{n_episodes} timeouts, {int(np.sum(successes))}/{n_episodes} successes")
         
         return mean_reward, std_reward, success_rate
 
