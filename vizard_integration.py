@@ -1,173 +1,242 @@
-"""
-vizard_integration.py
-Vizard visualization integration for Lunar Lander environment
-
-This module provides Vizard connectivity for real-time visualization of RL training
-episodes. It handles:
-- vizInterface initialization and configuration
-- Port management and connection settings
-- Thread-safe message passing
-- Automatic cleanup on errors
-
-Usage:
-    from vizard_integration import VizardManager
-    
-    viz = VizardManager(port=5556, enabled=True)
-    viz.add_spacecraft(lander, "Starship_HLS")
-    viz.render()  # Called each environment step
-"""
+# vizard_integration.py
+# Defensive VizardManager for Basilisk vizInterface.
+# Replace your existing vizard_integration.py with this file.
 
 import threading
 import warnings
-import os
-
+import socket
+import time
+import contextlib
 
 class VizardManager:
     """
-    Manages Vizard visualization for Basilisk simulations.
-    
-    Handles initialization, configuration, and safe cleanup of vizInterface.
-    Provides thread-safe rendering for parallel environments.
+    Robust Vizard manager that:
+      - chooses/validates a port
+      - initializes Basilisk vizInterface defensively (many attribute fallbacks)
+      - adds viz model to a Basilisk task
+      - exposes simple diagnostics for port/listen state
     """
-    
-    def __init__(self, port=5556, enabled=True, name="LunarLander"):
-        """
-        Initialize Vizard manager.
-        
-        Args:
-            port (int): Vizard connection port (default: 5556)
-            enabled (bool): Enable Vizard (disable to save resources)
-            name (str): Simulation name in Vizard
-        """
-        self.port = port
+    def __init__(self, port=None, enabled=True, name="LunarLander", auto_search=True):
+        self.requested_port = int(port) if port is not None else None
         self.enabled = enabled
         self.name = name
         self.viz = None
         self.lock = threading.Lock()
         self._initialized = False
-        
-        if enabled:
+        self.auto_search = auto_search
+
+        if self.enabled:
             self._initialize_vizard()
-    
+
+    # -------------------------
+    # Port utilities / probing
+    # -------------------------
+    @staticmethod
+    def _is_port_free(port, host='127.0.0.1'):
+        """Return True if port is free on host (TCP)."""
+        try:
+            with contextlib.closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind((host, int(port)))
+                return True
+        except OSError:
+            return False
+
+    @staticmethod
+    def _find_free_port(start=5570, end=5580):
+        """Return first free port in inclusive range, or None."""
+        for p in range(start, end + 1):
+            if VizardManager._is_port_free(p):
+                return p
+        return None
+
+    # -------------------------
+    # Initialization
+    # -------------------------
     def _initialize_vizard(self):
-        """Initialize vizInterface with error handling."""
+        """Attempt to initialize Basilisk vizInterface with many fallbacks and diagnostics."""
         if self._initialized:
             return
-        
+
         try:
-            from Basilisk.simulation import vizInterface
-            
-            self.viz = vizInterface.VizInterface()
-            self.viz.pubPortNumber = str(self.port)
-            
-            self._initialized = True
-            print(f"✓ Vizard initialized on port {self.port}")
-            print(f"  → Connect with: localhost:{self.port}")
-            
-        except ImportError as e:
-            warnings.warn(
-                f"Vizard vizInterface not available: {e}\n"
-                "Visualization disabled. Install Basilisk to enable."
-            )
-            self.enabled = False
+            # Import-only when needed (keeps module lightweight)
+            from Basilisk.simulation import vizInterface as _vizmod
         except Exception as e:
-            warnings.warn(f"Failed to initialize Vizard: {e}")
+            warnings.warn(f"[VizardManager] Basilisk.vizInterface import failed: {e}\n"
+                          "➡ Make sure your PYTHONPATH points to Basilisk/dist3 and that Basilisk is built.")
             self.enabled = False
-    
+            return
+
+        # Decide port
+        port = self.requested_port
+        if port is None and self.auto_search:
+            port = self._find_free_port(start=5570, end=5585) or 5570
+        elif port is None:
+            port = 5570
+
+        # Check whether port is free at OS level
+        port_free = self._is_port_free(port)
+        if not port_free:
+            print(f"[VizardManager] Warning: Port {port} is NOT free on localhost.")
+            print("  → Another process may be using it (check netstat). Trying to proceed anyway.")
+
+        # Create vizInterface object
+        try:
+            viz = _vizmod.VizInterface()
+        except Exception as e:
+            warnings.warn(f"[VizardManager] Failed to construct VizInterface(): {e}")
+            self.enabled = False
+            return
+
+        # Defensive attribute / method setting:
+        # try several plausible attribute/method names (historical variations)
+        def safe_set(obj, names, value, call=False):
+            """
+            Try each name in names:
+             - if attribute exists, set it
+             - if a method exists and call=True, call it with value
+             - return True if something was set/called
+            """
+            for n in names:
+                if hasattr(obj, n):
+                    attr = getattr(obj, n)
+                    # if callable and call==True, call it
+                    if call and callable(attr):
+                        try:
+                            attr(value)
+                            return True
+                        except Exception:
+                            continue
+                    # else try set attribute (if possible)
+                    try:
+                        setattr(obj, n, value)
+                        return True
+                    except Exception:
+                        # try calling if callable without call flag (rare)
+                        try:
+                            if callable(attr):
+                                attr(value)
+                                return True
+                        except Exception:
+                            continue
+            return False
+
+        # Set port in multiple possible ways
+        port_set = safe_set(viz, ['pubPortNumber', 'pub_port', 'pubPort', 'pubPortNumberStr', 'pubPortStr'], str(port))
+        if not port_set:
+            # sometimes an integer is expected
+            port_set = safe_set(viz, ['pubPortNumber', 'pub_port', 'pubPort'], port)
+        if not port_set:
+            # try a setter method if exists
+            port_set = safe_set(viz, ['setPubPort', 'setPubPortNumber'], port, call=True)
+
+        # Enable Vizard flag in multiple ways
+        enabled_set = safe_set(viz, ['UseVizard', 'useVizard', 'useVizardFlag'], True)
+        if not enabled_set:
+            enabled_set = safe_set(viz, ['setUseVizard', 'EnableVizard', 'enableVizard'], True, call=True)
+
+        # Some releases expect an explicit "connectToVizard" attr (but it's often readonly) — don't force it
+        if hasattr(viz, 'connectToVizard'):
+            # do not set if it's protected (can raise ValueError)
+            try:
+                setattr(viz, 'connectToVizard', True)
+            except Exception:
+                # ignore, it's often intentionally protected
+                pass
+
+        # Keep the object and mark initialized
+        self.viz = viz
+        self._initialized = True
+        self.port = port
+
+        # Print diagnostics
+        print(f"✓ Vizard initialized (object created).")
+        print(f"  Requested port: {self.requested_port or '(auto)'}  →  Using port: {self.port}")
+        print("  Attributes set:")
+        print(f"    pubPort-like set? {'yes' if port_set else 'no'}")
+        print(f"    UseVizard-like set? {'yes' if enabled_set else 'no'}")
+        print("  Tip: If Vizard times out, check netstat and firewall (see instructions).")
+
+        # Quick OS-level listen check: If vizInterface opened a socket immediately it will consume port.
+        # Wait briefly and poll port status to see if it is bound by this process.
+        time.sleep(0.15)
+        if not self._is_port_free(self.port):
+            print(f"  Port {self.port} appears to be in use (listening) — good (expected if Viz opened it).")
+        else:
+            print(f"  Port {self.port} still free after init — vizInterface may not have opened the socket yet.")
+
+    # -------------------------
+    # Add to simulation
+    # -------------------------
     def add_to_simulation(self, sim, task_name="task"):
         """
         Add vizInterface to Basilisk simulation task.
-        
-        Args:
-            sim: Basilisk SimulationBaseClass instance
-            task_name: Task name to add vizInterface to
         """
         if not self.enabled or self.viz is None:
+            print("[VizardManager] Viz disabled or not initialized; skipping add_to_simulation.")
             return
-        
+
         try:
             with self.lock:
+                # Basilisk expects sim.AddModelToTask(taskName, model)
                 sim.AddModelToTask(task_name, self.viz)
                 print(f"✓ Vizard interface added to simulation task '{task_name}'")
         except Exception as e:
-            warnings.warn(f"Failed to add vizInterface to task: {e}")
+            warnings.warn(f"[VizardManager] Failed to add vizInterface to task: {e}")
             self.enabled = False
-    
+
     def render(self):
-        """
-        Trigger render (no-op if Vizard disabled).
-        
-        Note: In Basilisk, rendering happens automatically during
-        ExecuteSimulation(). This method is here for API consistency.
-        """
+        """Placeholder for API compatibility. Basilisk handles rendering during ExecuteSimulation()."""
         if not self.enabled:
             return
-        # Vizard updates happen during simulation steps
-        pass
-    
-    def close(self):
-        """Clean up Vizard resources."""
-        if self.viz is not None:
-            try:
-                with self.lock:
-                    del self.viz
-            except Exception as e:
-                warnings.warn(f"Error closing Vizard: {e}")
-            finally:
-                self.viz = None
-                self._initialized = False
-    
-    def __enter__(self):
-        """Context manager support."""
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager cleanup."""
-        self.close()
-    
-    def __del__(self):
-        """Ensure cleanup on deletion."""
+        # Optionally call a viz update function if present
         try:
-            self.close()
+            if hasattr(self.viz, 'render') and callable(self.viz.render):
+                self.viz.render()
         except Exception:
             pass
 
-
-class VizardConfig:
-    """Configuration helper for Vizard settings."""
-    
-    # Port settings
-    DEFAULT_PORT = 5556
-    PORT_RANGE = (5556, 5566)  # Alternative ports if default unavailable
-    
-    # Rendering settings
-    DEFAULT_ENABLED = True
-    AUTO_PORT_SEARCH = True
-    
-    # Performance settings
-    FRAME_RATE = 10  # Hz
-    UPDATE_FREQUENCY = 0.1  # seconds
-    
-    @classmethod
-    def get_available_port(cls):
-        """
-        Find an available port for Vizard.
-        
-        Returns:
-            int: Available port number, or DEFAULT_PORT if none found
-        """
-        if not cls.AUTO_PORT_SEARCH:
-            return cls.DEFAULT_PORT
-        
-        import socket
-        
-        for port in range(*cls.PORT_RANGE):
+    def close(self):
+        """Attempt to clean up the VizInterface object safely."""
+        if self.viz is not None:
             try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.bind(('localhost', port))
-                sock.close()
-                return port
-            except OSError:
-                continue
-        
-        return cls.DEFAULT_PORT
+                with self.lock:
+                    # call a shutdown/close if available
+                    if hasattr(self.viz, 'shutdown') and callable(self.viz.shutdown):
+                        try:
+                            self.viz.shutdown()
+                        except Exception:
+                            pass
+                    if hasattr(self.viz, 'Close') and callable(self.viz.Close):
+                        try:
+                            self.viz.Close()
+                        except Exception:
+                            pass
+                    # best effort delete
+                    del self.viz
+            except Exception as e:
+                warnings.warn(f"[VizardManager] Error closing Vizard: {e}")
+            finally:
+                self.viz = None
+                self._initialized = False
+
+    # context manager support
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+# ---------------------------------------
+# Simple helper to show local port status
+# ---------------------------------------
+def print_local_port_status(port):
+    """
+    Print very quick local hints for the given port.
+    (Non-admin; uses bind-test only.)
+    """
+    free = VizardManager._is_port_free(port)
+    if free:
+        print(f"[port status] {port} appears free (no listener detected by bind test).")
+    else:
+        print(f"[port status] {port} appears IN USE (another process is listening).")
