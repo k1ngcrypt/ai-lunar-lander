@@ -45,7 +45,7 @@ setup_basilisk_path()
 
 from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor
 from Basilisk.simulation import fuelTank, dragDynamicEffector, exponentialAtmosphere, extForceTorque
-from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody, unitTestSupport
+from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody, unitTestSupport, vizSupport
 from Basilisk.architecture import messaging
 
 # Import Starship HLS configuration constants
@@ -1071,7 +1071,53 @@ def run():
     scSim.AddModelToTask(dynTaskName, loxTankLog)
     
     # ----------------------------------------------------------------------
-    # 8. Execute Simulation
+    # 8. Setup Visualization (Vizard Rendering)
+    # ----------------------------------------------------------------------
+    print("\n" + "="*60)
+    print("INITIALIZING BASILISK + VIZARD VISUALIZATION")
+    print("="*60)
+    
+    # Enable Unity visualization using vizSupport helper function
+    viz = vizSupport.enableUnityVisualization(
+        scSim=scSim,
+        simTaskName=dynTaskName,
+        scList=lander,
+        liveStream=True,
+        broadcastStream=True,
+        noDisplay=False
+    )
+    
+    # Apply custom Vizard settings for lunar lander scenario
+    # Reference: VizardSettings documentation in Basilisk
+    
+    # Lighting and appearance
+    viz.settings.ambient = 0.6  # 60% ambient lighting (lunar surface is very dark)
+    viz.settings.skyBox = "black"  # Space background
+    
+    # Coordinate system display
+    viz.settings.spacecraftCSon = 1  # Show spacecraft body-fixed axes
+    viz.settings.planetCSon = 1      # Show Moon-centered inertial axes
+    viz.settings.orbitLinesOn = 1    # Show ground track
+    
+    # Spacecraft visualization
+    viz.settings.defaultSpacecraftSprite = "bskSat"  # Default satellite sprite
+    viz.settings.showSpacecraftAsSprites = 0  # Use 3D model if available, fall back to sprite
+    
+    # GUI customization
+    viz.settings.customGUIScale = -1  # Auto-scale GUI
+    
+    # Performance settings
+    viz.settings.showHillFrame = 0  # Don't show Hill frame (not needed for landing)
+    viz.settings.showVelocityVector = 1  # Display velocity vector
+    viz.settings.showEnergyLines = 0  # Don't show energy lines
+    
+    print("✓ Vizard visualization enabled")
+    print(f"  Streaming on auto-selected port")
+    print(f"  Connect to: Basilisk Vizard on localhost")
+    print("="*60 + "\n")
+    
+    # ----------------------------------------------------------------------
+    # 8a. Execute Simulation
     # ----------------------------------------------------------------------
     scSim.InitializeSimulation()
     scSim.ConfigureStopTime(simulationTime)
@@ -1083,6 +1129,7 @@ def run():
     print(f"Time step: {simulationTimeStep * macros.NANO2SEC} seconds")
     print("Terrain: Analytical regolith model (high performance)")
     print("Sensors: IMU, LIDAR, Altimeter, Fuel, Attitude (all with noise)")
+    print("Visualization: Basilisk Vizard (live streaming to Unity/Vizard)")
     print("="*60 + "\n")
     
     # Test AI sensor suite during simulation
@@ -1092,8 +1139,6 @@ def run():
     current_time = 0.0
     step_count = 0
     sensor_read_interval = 0.5  # Read sensors every 0.5 seconds for demo
-    
-    scSim.InitializeSimulation()
     
     while current_time < simulationTime * macros.NANO2SEC:
         # Update thruster controller (default hover test commands)
