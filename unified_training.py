@@ -1074,9 +1074,20 @@ class UnifiedTrainer:
         
         # Create eval environment with same factory pattern as training
         # This ensures Basilisk path setup and proper initialization
-        # DO NOT wrap in VecNormalize - EvalCallback will sync from training env
         eval_config = {'observation_mode': 'compact', 'max_episode_steps': 1000}
         eval_env = DummyVecEnv([make_lunar_env(eval_config, self.seed, self.n_envs)])
+        
+        # Wrap with VecNormalize to match training env structure (required by SB3)
+        if isinstance(env, VecNormalize):
+            eval_env = VecNormalize(
+                eval_env,
+                training=False,      # Don't update stats during eval  
+                norm_obs=True,       # Normalize observations
+                norm_reward=False,   # Don't normalize rewards
+                clip_obs=10.0,
+                gamma=0.99
+            )
+            # EvalCallback will sync the running stats automatically
         
         # Create or load model
         if resume_path:
@@ -1468,8 +1479,20 @@ class UnifiedTrainer:
         
         # Create eval environment (must share same VecNormalize stats for consistent observations)
         # CRITICAL: Use same factory pattern as training envs to ensure Basilisk path is set up
-        # DO NOT wrap in VecNormalize here - EvalCallback will sync from training env automatically
         eval_env = DummyVecEnv([make_lunar_env(stage.env_config, self.seed, n_envs)])
+        
+        # Wrap eval env with VecNormalize to match training env structure
+        # SB3's EvalCallback requires both envs to have same wrapper type
+        if isinstance(env, VecNormalize):
+            eval_env = VecNormalize(
+                eval_env,
+                training=False,      # Don't update stats during eval
+                norm_obs=True,       # Normalize observations
+                norm_reward=False,   # Don't normalize rewards (we want raw values for evaluation)
+                clip_obs=10.0,
+                gamma=0.99
+            )
+            # EvalCallback will sync the running stats automatically via sync_envs_normalization()
         
         # Create or update model
         if self.model is None:
