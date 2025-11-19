@@ -14,6 +14,9 @@ Separated from ScenarioLunarLanderStarter.py for better code maintainability.
 import os
 import numpy as np
 
+# Import Moon radius constant
+import starship_constants as SC
+
 
 class LunarRegolithModel:
     """
@@ -358,7 +361,7 @@ class LunarRegolithModel:
         - Terrain-type dependent properties
         
         Args:
-            position: [x, y, z] in inertial frame (m)
+            position: [x, y, z] in inertial frame (m) - Moon-centered coordinates
             velocity: [vx, vy, vz] in inertial frame (m/s)
             contact_area: Contact patch area (m²)
             contact_width: Contact patch width (m) - for pressure calculation
@@ -374,8 +377,12 @@ class LunarRegolithModel:
         terrain_normal = self.get_terrain_normal(x, y)
         terrain_props = self.get_terrain_properties(x, y)
         
+        # CRITICAL: z is in Moon-centered inertial frame, need to subtract Moon radius
+        # to get altitude above Moon surface before comparing with terrain
+        altitude_above_surface = z - SC.MOON_RADIUS
+        
         # Penetration depth (positive when below surface)
-        penetration = terrain_height - z
+        penetration = terrain_height - altitude_above_surface
         
         if penetration <= 0:
             return np.zeros(3)
