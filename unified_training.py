@@ -731,8 +731,8 @@ class UnifiedTrainer:
             env_config={
                 'observation_mode': 'compact',
                 'max_episode_steps': 600,
-                'initial_altitude_range': (50.0, 100.0),
-                'initial_velocity_range': ((-5.0, 5.0), (-5.0, 5.0), (-5.0, -2.0)),
+                'initial_altitude_range': (30.0, 60.0),  # EASIER: Lower altitude (was 50-100)
+                'initial_velocity_range': ((-2.0, 2.0), (-2.0, 2.0), (-3.0, -1.0)),  # EASIER: Lower horizontal velocity (was ±5)
                 'terrain_config': {
                     'size': 1000.0,
                     'resolution': 100,
@@ -741,9 +741,9 @@ class UnifiedTrainer:
                     'crater_radius_range': (0, 0)
                 }
             },
-            success_threshold=400.0,
+            success_threshold=300.0,  # EASIER: Reduced from 400 (allows harder landings)
             min_episodes=200,
-            max_timesteps=200_000  # OPTIMIZED: 2x from 100k (high-end hardware)
+            max_timesteps=300_000  # EXTENDED: More training time for mastery (was 200k)
         ))
         
         # Stage 2: Medium altitude with gentle terrain
@@ -1321,9 +1321,9 @@ class UnifiedTrainer:
                     print(f"✓ Stage mastered! Advancing to next stage...\n")
                     stage_idx += 1  # Advance
                     
-                elif stage_attempts[stage_idx] < 3:
-                    # Allow up to 3 attempts at current stage
-                    print(f"⚠ Stage not mastered. Retrying same stage (attempt {stage_attempts[stage_idx] + 1}/3)...\n")
+                elif stage_attempts[stage_idx] < 5:
+                    # Allow up to 5 attempts at current stage (increased from 3 for Stage 1 mastery)
+                    print(f"⚠ Stage not mastered. Retrying same stage (attempt {stage_attempts[stage_idx] + 1}/5)...\n")
                     # Stay at current stage (will retry on next iteration)
                     
                 elif stage_idx > 0:
