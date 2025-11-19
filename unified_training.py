@@ -85,7 +85,7 @@ from lunar_lander_env import LunarLanderEnv
 
 def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
     """
-    Standalone environment factory for SubprocVecEnv.
+    Standalone environment factory for SubprocVecEnv and DummyVecEnv.
     Must be at module level (not a class method) to be picklable.
     
     Args:
@@ -110,12 +110,11 @@ def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
         from lunar_lander_env import LunarLanderEnv
         from stable_baselines3.common.monitor import Monitor
         
-        # CRITICAL FIX: The state engine approach has a fundamental bug where setState()
-        # doesn't properly update the integrator's cached initial conditions.
-        # We must delay simulation creation until the first reset() call.
+        # CRITICAL FIX: Do NOT call reset() here - let DummyVecEnv/SubprocVecEnv handle it
+        # Calling reset() here with delay_sim_creation causes a hang with n_envs=1
+        # The vectorized env wrapper will call reset() at the right time
         config['delay_sim_creation'] = True
         env = LunarLanderEnv(**config)
-        env.reset(seed=seed + rank)
         
         # Wrap with Monitor for episode statistics tracking
         # This is required by EvalCallback and prevents warnings
