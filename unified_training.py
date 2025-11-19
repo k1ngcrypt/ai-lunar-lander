@@ -1074,9 +1074,9 @@ class UnifiedTrainer:
         
         # Create eval environment with same factory pattern as training
         # This ensures Basilisk path setup and proper initialization
+        # DO NOT wrap in VecNormalize - EvalCallback will sync from training env
         eval_config = {'observation_mode': 'compact', 'max_episode_steps': 1000}
         eval_env = DummyVecEnv([make_lunar_env(eval_config, self.seed, self.n_envs)])
-        eval_env = self._normalize_env(eval_env, training=False)  # Eval: obs normalization only
         
         # Create or load model
         if resume_path:
@@ -1468,27 +1468,8 @@ class UnifiedTrainer:
         
         # Create eval environment (must share same VecNormalize stats for consistent observations)
         # CRITICAL: Use same factory pattern as training envs to ensure Basilisk path is set up
+        # DO NOT wrap in VecNormalize here - EvalCallback will sync from training env automatically
         eval_env = DummyVecEnv([make_lunar_env(stage.env_config, self.seed, n_envs)])
-        
-        # Share VecNormalize stats with training env (critical for consistent evaluation)
-        # Set training=False to freeze stats updates, norm_reward=False to get raw rewards
-        if isinstance(env, VecNormalize):
-            # Clone the training env's VecNormalize wrapper for eval
-            eval_env = VecNormalize(
-                eval_env,
-                training=False,        # Don't update stats during eval
-                norm_obs=True,         # Use same obs normalization
-                norm_reward=False,     # Don't normalize rewards (we want raw values)
-                clip_obs=10.0,
-                clip_reward=10.0,
-                gamma=0.99
-            )
-            # Copy the running statistics from training env
-            eval_env.obs_rms = env.obs_rms
-            eval_env.ret_rms = env.ret_rms
-        else:
-            # Fallback if env is not VecNormalized (shouldn't happen)
-            eval_env = self._normalize_env(eval_env, training=False)
         
         # Create or update model
         if self.model is None:
@@ -1510,6 +1491,8 @@ class UnifiedTrainer:
             verbose=1
         )
         
+        # CRITICAL: Pass eval_env without VecNormalize wrapper
+        # EvalCallback will automatically sync normalization from model.get_env()
         eval_callback = SafeEvalCallback(
             eval_env,
             best_model_save_path=os.path.join(self.save_dir, f'{stage.name}_best'),
