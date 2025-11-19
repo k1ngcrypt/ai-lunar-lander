@@ -1082,33 +1082,10 @@ def run():
         scSim=scSim,
         simTaskName=dynTaskName,
         scList=lander,
-        liveStream=True,
-        broadcastStream=True,
-        noDisplay=False
+        saveFile='simulationData.bin'
+
     )
 
-    # Defensive: some VizInterface implementations require an explicit
-    # start/run/connect call to begin listening for clients. Call any
-    # commonly-used method names if available so the viz stays active
-    # and doesn't return control before Vizard connects.
-    try:
-        if hasattr(viz, 'start') and callable(viz.start):
-            viz.start()
-        elif hasattr(viz, 'run') and callable(viz.run):
-            viz.run()
-        elif hasattr(viz, 'Run') and callable(viz.Run):
-            viz.Run()
-        elif hasattr(viz, 'connectToVizard'):
-            # some older interfaces expose a flag; try to set it True
-            try:
-                setattr(viz, 'connectToVizard', True)
-            except Exception:
-                pass
-        else:
-            print("Note: VizInterface has no start/run/connect method; assuming auto-start.")
-    except Exception:
-        # Don't let visualization startup failure stop the simulation
-        print("Warning: VizInterface start/run/connect call failed; continuing without explicit start.")
     
     # Apply custom Vizard settings for lunar lander scenario
     # Reference: VizardSettings documentation in Basilisk
@@ -1193,7 +1170,6 @@ def run():
     print("SIMULATION COMPLETED")
     print("="*60 + "\n")
     
-    return scSim, lander, aiSensors, thrController
 
 
 # ======================================================================
