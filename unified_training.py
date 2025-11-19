@@ -108,6 +108,7 @@ def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
         from common_utils import setup_basilisk_path
         setup_basilisk_path()
         from lunar_lander_env import LunarLanderEnv
+        from stable_baselines3.common.monitor import Monitor
         
         # CRITICAL FIX: The state engine approach has a fundamental bug where setState()
         # doesn't properly update the integrator's cached initial conditions.
@@ -115,6 +116,10 @@ def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
         config['delay_sim_creation'] = True
         env = LunarLanderEnv(**config)
         env.reset(seed=seed + rank)
+        
+        # Wrap with Monitor for episode statistics tracking
+        # This is required by EvalCallback and prevents warnings
+        env = Monitor(env)
         return env
     
     return _init
@@ -246,6 +251,45 @@ class RewardStatisticsCallback(BaseCallback):
             for comp_name in self.reward_components:
                 if len(self.reward_components[comp_name]) > 200:
                     self.reward_components[comp_name] = self.reward_components[comp_name][-200:]
+
+
+class SafeEvalCallback(EvalCallback):
+    """
+    Enhanced EvalCallback that handles evaluation crashes gracefully.
+    
+    CRITICAL FIX: EvalCallback can crash when eval environment has issues,
+    especially in SubprocVecEnv context. This wrapper catches those failures.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.eval_failure_count = 0
+        
+    def _on_step(self) -> bool:
+        """Override to add error handling around evaluation"""
+        continue_training = True
+        
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            try:
+                # Call parent evaluation logic
+                continue_training = super()._on_step()
+            except Exception as e:
+                self.eval_failure_count += 1
+                if self.verbose > 0:
+                    print(f"\n⚠ WARNING: Evaluation failed (attempt {self.eval_failure_count}): {e}")
+                    print(f"  Training continues, but model performance not evaluated.")
+                
+                # If evaluation fails repeatedly, disable it
+                if self.eval_failure_count >= 3:
+                    print(f"\n⚠ WARNING: Evaluation disabled after {self.eval_failure_count} failures.")
+                    self.eval_freq = 0  # Disable further evaluations
+                
+                continue_training = True  # Continue training despite eval failure
+        else:
+            # Not an eval step, just continue normally
+            continue_training = True
+            
+        return continue_training
 
 
 class SafeCheckpointCallback(CheckpointCallback):
@@ -1028,7 +1072,10 @@ class UnifiedTrainer:
         else:
             env = self._normalize_env(env, training=True)
         
-        eval_env = DummyVecEnv([self._make_env(rank=self.n_envs)])
+        # Create eval environment with same factory pattern as training
+        # This ensures Basilisk path setup and proper initialization
+        eval_config = {'observation_mode': 'compact', 'max_episode_steps': 1000}
+        eval_env = DummyVecEnv([make_lunar_env(eval_config, self.seed, self.n_envs)])
         eval_env = self._normalize_env(eval_env, training=False)  # Eval: obs normalization only
         
         # Create or load model
@@ -1063,7 +1110,7 @@ class UnifiedTrainer:
             verbose=1
         )
         
-        eval_callback = EvalCallback(
+        eval_callback = SafeEvalCallback(
             eval_env,
             best_model_save_path=os.path.join(self.save_dir, 'best_model'),
             log_path=os.path.join(self.log_dir, 'eval'),
@@ -1420,7 +1467,8 @@ class UnifiedTrainer:
             env = self._normalize_env(env, training=True)
         
         # Create eval environment (must share same VecNormalize stats for consistent observations)
-        eval_env = DummyVecEnv([self._make_env(stage.env_config, n_envs)])
+        # CRITICAL: Use same factory pattern as training envs to ensure Basilisk path is set up
+        eval_env = DummyVecEnv([make_lunar_env(stage.env_config, self.seed, n_envs)])
         
         # Share VecNormalize stats with training env (critical for consistent evaluation)
         # Set training=False to freeze stats updates, norm_reward=False to get raw rewards
@@ -1462,7 +1510,7 @@ class UnifiedTrainer:
             verbose=1
         )
         
-        eval_callback = EvalCallback(
+        eval_callback = SafeEvalCallback(
             eval_env,
             best_model_save_path=os.path.join(self.save_dir, f'{stage.name}_best'),
             log_path=os.path.join(self.log_dir, f'{stage.name}_eval'),
