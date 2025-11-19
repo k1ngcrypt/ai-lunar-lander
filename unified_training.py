@@ -1691,12 +1691,14 @@ class UnifiedTrainer:
         
         print("✓ Model loaded successfully")
         
-        # Create environment
+        # Create environment using same settings as training for consistency
         config = env_config or {
             'observation_mode': 'compact',
-            'render_mode': 'human' if render else None
+            'render_mode': 'human' if render else None,
+            'max_episode_steps': 1000
         }
-        config['create_new_sim_on_reset'] = True  # Avoid Basilisk warnings
+        # Use optimized REUSE mode (same as training) instead of CREATE_NEW
+        # The delay_sim_creation fix makes REUSE mode work correctly
         env = LunarLanderEnv(**config)
         
         # Evaluate
