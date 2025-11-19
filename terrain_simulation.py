@@ -214,8 +214,6 @@ class LunarRegolithModel:
         self.heightmap += roughness
         
         self.terrain_loaded = True
-        print(f"✓ Generated procedural terrain with {num_craters} craters")
-        print(f"  Height range: [{np.min(self.heightmap):.2f}, {np.max(self.heightmap):.2f}] m")
     
     def get_height(self, x, y):
         """
