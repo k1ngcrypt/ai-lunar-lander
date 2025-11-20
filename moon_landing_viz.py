@@ -8,34 +8,21 @@ import sys
 import numpy as np
 import time
 
-# -------------------------
-# Basilisk 2.3 Vizard interface
-# -------------------------
 try:
     from Basilisk import VizInterface
 except ImportError:
     print("⚠ Basilisk VizInterface not found. Make sure Basilisk 2.3 is installed.")
     sys.exit(1)
 
-# -------------------------
-# Terrain generator
-# -------------------------
 try:
     from generate_terrain import generate_lunar_terrain
 except ImportError:
     print("⚠ generate_terrain.py not found.")
     sys.exit(1)
 
-# -------------------------
-# Paths and files
-# -------------------------
 TERRAIN_SIZE = 2000.0  # meters
 RESOLUTION = 200
 starship_model = "starship_hls.glb"
-
-# -------------------------
-# Always generate new terrain
-# -------------------------
 print("Generating new lunar terrain...")
 heightmap = generate_lunar_terrain(
     size=TERRAIN_SIZE,
@@ -63,19 +50,14 @@ vizard.addSphere(
     pos=[0, 0, -50]
 )
 
-# -------------------------
-# Create terrain mesh in Vizard
-# -------------------------
 print("Creating terrain mesh...")
 x = np.linspace(-TERRAIN_SIZE / 2, TERRAIN_SIZE / 2, RESOLUTION)
 y = np.linspace(-TERRAIN_SIZE / 2, TERRAIN_SIZE / 2, RESOLUTION)
 X, Y = np.meshgrid(x, y)
 Z = heightmap
 
-# Flatten vertices
 vertices = np.column_stack([X.ravel(), Y.ravel(), Z.ravel()])
 
-# Build faces for triangles
 faces = []
 for i in range(RESOLUTION - 1):
     for j in range(RESOLUTION - 1):
@@ -93,9 +75,6 @@ vizard.addMesh(
     color=[100, 100, 100]
 )
 
-# -------------------------
-# Load starship model
-# -------------------------
 if not starship_model:
     print("⚠ Starship model not specified.")
     sys.exit(1)
@@ -108,9 +87,6 @@ vizard.addModel(
     pos=[0, 0, 20]
 )
 
-# -------------------------
-# Lighting
-# -------------------------
 vizard.addLight(
     "Sun",
     type="directional",
@@ -118,13 +94,8 @@ vizard.addLight(
     color=[255, 255, 255]
 )
 
-# -------------------------
-# Real-time update loop
-# -------------------------
 def simulate_basilisk_positions():
-    """
-    Simulate incoming Basilisk position data
-    """
+    """Simulate incoming Basilisk position data"""
     t = 0
     while True:
         x_pos = np.sin(t/10) * 100
@@ -139,10 +110,8 @@ starship_name = "Starship"
 
 print("Starting real-time Vizard visualization loop...")
 for pos in positions:
-    # Update starship position
     vizard.setPosition(starship_name, pos)
     
-    # Camera follows starship
     cam_pos = [pos[0]+50, pos[1]+50, pos[2]+50]
     vizard.setCameraPosition(cam_pos, pos)
     
