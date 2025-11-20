@@ -2,20 +2,16 @@
 lunar_lander_env.py
 Gymnasium Environment Wrapper for Basilisk Lunar Lander
 
-This module provides a Gymnasium-compatible environment for training RL agents
-on the lunar landing task using Stable Baselines3.
+Gymnasium-compatible environment for training RL agents on lunar landing
+using Stable Baselines3.
 
-This is a lightweight wrapper around ScenarioLunarLanderStarter.py that provides
-the Gymnasium interface for reinforcement learning.
-
-Features:
+Lightweight wrapper around ScenarioLunarLanderStarter.py providing:
 - Full Gymnasium API compatibility (step, reset, render)
 - Configurable observation and action spaces
 - Reward shaping for landing task
 - Episode termination conditions
-- Reuses ScenarioLunarLanderStarter simulation components
 
-NOTE: All Starship HLS configuration constants are imported from starship_constants.py
+NOTE: All Starship HLS configuration constants from starship_constants.py
 """
 
 import numpy as np
@@ -26,31 +22,26 @@ import os
 import sys
 import io
 
-# Suppress Basilisk SWIG memory leak warnings (cosmetic only, not actual leaks)
-# The BSKLogger warnings are due to SWIG not finding destructors for singleton objects
-# These are cleaned up by Python's garbage collector and do not accumulate
+# Suppress Basilisk SWIG memory leak warnings (cosmetic only)
+# BSKLogger warnings are due to SWIG not finding singleton destructors
 warnings.filterwarnings('ignore', message='.*BSKLogger.*memory leak.*')
 warnings.filterwarnings('ignore', message='swig/python detected a memory leak.*')
 
-# Suppress Basilisk state engine warnings (intentional behavior for optimized reset)
-# These warnings occur when using setState() for fast episode resets
-# This is the recommended approach for performance in RL training
+# Suppress Basilisk state engine warnings (intentional for optimized reset)
+# setState() is recommended for fast episode resets
 warnings.filterwarnings('ignore', message='.*You created the dynamic property.*more than once.*')
 warnings.filterwarnings('ignore', message='.*You created a state with the name.*more than once.*')
 
 import os
-# Import common utilities
 from common_utils import setup_basilisk_path, quaternion_to_euler
 
 
-# Add Basilisk to path
 setup_basilisk_path()
 
-# Context manager to suppress Basilisk C++ warnings
 class SuppressBasiliskWarnings:
     """
-    Context manager to suppress BSK_WARNING messages printed directly to stderr
-    by Basilisk's C++ code at the file descriptor level.
+    Context manager to suppress BSK_WARNING messages from Basilisk C++ code
+    at the file descriptor level.
     """
     def __init__(self):
         self.original_stderr_fd = None
@@ -59,22 +50,18 @@ class SuppressBasiliskWarnings:
         
     def __enter__(self):
         try:
-            # Save the original stderr file descriptor
             self.original_stderr_fd = sys.stderr.fileno()
             self.saved_stderr_fd = os.dup(self.original_stderr_fd)
             
-            # Redirect stderr to devnull at the file descriptor level
             self.devnull_fd = os.open(os.devnull, os.O_WRONLY)
             os.dup2(self.devnull_fd, self.original_stderr_fd)
         except Exception:
-            # If file descriptor manipulation fails, fall back to Python-level suppression
             pass
         return self
         
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
             if self.saved_stderr_fd is not None:
-                # Restore the original stderr
                 os.dup2(self.saved_stderr_fd, self.original_stderr_fd)
                 os.close(self.saved_stderr_fd)
             if self.devnull_fd is not None:
@@ -85,7 +72,6 @@ class SuppressBasiliskWarnings:
 
 from Basilisk.utilities import macros
 
-# Import Starship HLS configuration constants
 import starship_constants as SC
 
 
@@ -93,46 +79,44 @@ class LunarLanderEnv(gym.Env):
     """
     Gymnasium Environment for Starship HLS Lunar Landing
     
-    This environment wraps the ScenarioLunarLanderStarter simulation
-    and provides a standard Gymnasium interface for RL training.
+    Wraps ScenarioLunarLanderStarter simulation with standard Gymnasium interface.
     
     Observation Space:
-        Compact mode (32D) - ENHANCED:
+        Compact mode (32D):
         - Position (2): [x, y]
         - Altitude (1): [altitude_terrain] - terrain-relative
         - Velocity (3): [vx, vy, vz]
-        - Attitude (3): [roll, pitch, yaw] - Euler angles in radians (eliminates quaternion ambiguity)
+        - Attitude (3): [roll, pitch, yaw] - Euler angles (eliminates quaternion ambiguity)
         - Angular velocity (3): [ωx, ωy, ωz]
-        - Fuel fraction (1): remaining fuel [0-1]
-        - Fuel flow rate (1): kg/s (consumption rate for planning)
-        - Time to impact (1): estimated seconds until ground contact
+        - Fuel fraction (1): remaining [0-1]
+        - Fuel flow rate (1): kg/s
+        - Time to impact (1): estimated seconds
         - LIDAR stats (3): [min_range, mean_range, std_range]
-        - LIDAR azimuthal (8): minimum range in 8 compass directions (N, NE, E, SE, S, SW, W, NW)
+        - LIDAR azimuthal (8): min range in 8 directions (N, NE, E, SE, S, SW, W, NW)
         - IMU accel (3): [ax, ay, az]
         - IMU gyro (3): [gx, gy, gz]
         
         Full mode (200+D): Complete sensor suite with history
     
-    Action Space (15D) - COMPREHENSIVE PILOT CONTROL:
-        - Primary engine throttles (3): individual throttle [0.4-1.0] for differential thrust
-        - Primary engine gimbals (6): [pitch, yaw] × 3 engines in radians [-0.14, 0.14] (±8°)
-        - Mid-body thruster groups (3): [+X, +Y, +Z rotation] throttle [0, 1]
-        - RCS thruster groups (3): [pitch, yaw, roll] throttle [0, 1]
+    Action Space (15D):
+        - Primary engine throttles (3): [0.4-1.0] for differential thrust
+        - Primary engine gimbals (6): [pitch, yaw] × 3 engines [-0.14, 0.14] rad (±8°)
+        - Mid-body thruster groups (3): [+X, +Y, +Z rotation] [0, 1]
+        - RCS thruster groups (3): [pitch, yaw, roll] [0, 1]
         
-        Action smoothing: 80% old action + 20% new action (exponential moving average filter)
+        Action smoothing: 80% old + 20% new (exponential moving average)
     
     Reward Function:
-        Comprehensive multi-component architecture:
-        - Terminal rewards: ±1000 (10x larger than shaping) - success +1000, precision +200, fuel efficiency +150
-        - Progress tracking: 0-5 per step for continuous guidance (descent profile, approach angle, proximity)
-        - Safety penalties: ±2 per step for danger zone warnings and efficiency
-        - Control quality: ±1 per step for smooth, efficient control
-        - Fuel efficiency bonus: ONLY on successful landing (prevents hoarding)
-        - Success window: 0-5m altitude, velocity < 3 m/s, horizontal < 2 m/s, attitude < 15°
+        Multi-component architecture:
+        - Terminal: ±1000 (10x larger than shaping) - success +1000, precision +200, fuel +150
+        - Progress: 0-5/step (descent profile, approach angle, proximity)
+        - Safety: ±2/step (danger warnings, efficiency)
+        - Control: ±1/step (smooth control)
+        - Fuel bonus: ONLY on successful landing
+        - Success: 0-5m altitude, velocity < 3 m/s, horizontal < 2 m/s, attitude < 15°
     
     Reset Optimization:
-        Uses Basilisk state engine for direct state updates (eliminates warnings, 100x faster)
-        Optional create_new_sim_on_reset flag for clean but slower reset
+        Uses Basilisk state engine for direct state updates (100x faster)
     """
     
     metadata = {'render_modes': ['human', 'rgb_array'], 'render_fps': 10}
@@ -140,7 +124,7 @@ class LunarLanderEnv(gym.Env):
     def __init__(self, 
                  render_mode=None,
                  max_episode_steps=1000,
-                 observation_mode='compact',  # 'compact' or 'full'
+                 observation_mode='compact',
                  initial_altitude_range=(18000.0, 22000.0),
                  initial_velocity_range=((-200.0, 200.0), (-200.0, 200.0), (-100.0, -50.0)),
                  terrain_config=None,
@@ -150,16 +134,14 @@ class LunarLanderEnv(gym.Env):
         Initialize Lunar Lander Gymnasium Environment
         
         Args:
-            render_mode: 'human' or 'rgb_array' or None
+            render_mode: 'human', 'rgb_array', or None
             max_episode_steps: Maximum steps per episode
             observation_mode: 'compact' (32D) or 'full' (200+ D)
-            initial_altitude_range: (min, max) initial altitude in meters above terrain
-            initial_velocity_range: Tuple of 3 ranges (vx, vy, vz) in m/s for suborbital trajectory
-                                    Default simulates descent from ~20km with ~200 m/s horizontal speed
-            terrain_config: Dict with terrain generation parameters
-            create_new_sim_on_reset: If True, recreate simulation each reset (slow but clean).
-            delay_sim_creation: If True, delay simulation creation until first reset (fixes init bug).
-                                     If False, reuse simulation (fast)
+            initial_altitude_range: (min, max) altitude in meters
+            initial_velocity_range: ((vx_min, vx_max), (vy_min, vy_max), (vz_min, vz_max)) in m/s
+            terrain_config: Dict with terrain parameters
+            create_new_sim_on_reset: Recreate simulation each reset (slow but clean)
+            delay_sim_creation: Delay sim creation until first reset
         """
         super().__init__()
         
@@ -171,38 +153,27 @@ class LunarLanderEnv(gym.Env):
         self.create_new_sim_on_reset = create_new_sim_on_reset
         self.delay_sim_creation = delay_sim_creation
         
-        # Episode tracking
         self.current_step = 0
         self.episode_count = 0
         
-        # Fuel tracking for flow rate calculation
         self.prev_fuel_mass = None
         self.fuel_flow_rate = 0.0  # kg/s
         
-        # Action smoothing with realistic actuator bandwidth limits
-        # Based on physical response times of spacecraft control systems
+        # Action smoothing based on physical response times
         self.prev_action = None
         
-        # Per-system smoothing rates (alpha values for EMA filter)
-        # Higher alpha = faster response, lower alpha = more smoothing
-        # Formula: alpha ≈ 1 - exp(-dt / tau), where tau = system time constant
+        # Per-system smoothing rates (alpha for EMA filter)
+        # Higher alpha = faster response
         self.action_smoothing = {
-            'throttle': 0.4,    # tau ≈ 0.15s (engine throttle valve response)
-            'gimbal': 0.7,      # tau ≈ 0.04s (hydraulic actuator, fast response)
-            'midbody': 0.8,     # tau ≈ 0.02s (thruster valve, very fast)
-            'rcs': 0.9          # tau ≈ 0.01s (RCS valves, near-instantaneous)
+            'throttle': 0.4,    # tau ≈ 0.15s (throttle valve)
+            'gimbal': 0.7,      # tau ≈ 0.04s (hydraulic actuator)
+            'midbody': 0.8,     # tau ≈ 0.02s (thruster valve)
+            'rcs': 0.9          # tau ≈ 0.01s (RCS valves)
         }
-        # Rationale:
-        # - Throttle: Large engines have thermal/pressure dynamics (~150ms)
-        # - Gimbal: Hydraulic actuators are fast but have mechanical inertia (~40ms)
-        # - Mid-body: Medium thrusters with quick valve response (~20ms)
-        # - RCS: Small thrusters designed for rapid pulse firing (~10ms)
         
-        # Reward component tracking (for debugging and analysis)
         self._last_reward_components = {}
         
-        # Simulation parameters
-        self.dt = 0.1  # Simulation timestep (seconds)
+        self.dt = 0.1  # Simulation timestep
         
         # Terrain configuration
         if terrain_config is None:
