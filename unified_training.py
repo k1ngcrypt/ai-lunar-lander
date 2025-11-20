@@ -1039,12 +1039,27 @@ class UnifiedTrainer:
             print(f"Resuming from: {resume_path}")
         print("="*80 + "\n")
         
+        # EXTREME DIFFICULTY: Use Stage 5 configuration (suborbital ~20km, high speed, rough terrain)
+        extreme_config = {
+            'observation_mode': 'compact',
+            'max_episode_steps': 1500,
+            'initial_altitude_range': (18000.0, 22000.0),  # Suborbital trajectory from ~20km
+            'initial_velocity_range': ((-200.0, 200.0), (-200.0, 200.0), (-100.0, -50.0)),  # Realistic suborbital velocities
+            'terrain_config': {
+                'size': 2500.0,
+                'resolution': 250,
+                'num_craters': 25,
+                'crater_depth_range': (5, 15),
+                'crater_radius_range': (10, 80)
+            }
+        }
+        
         # Create environments with subprocess safety
         if self.n_envs > 1:
-            print(f"Creating {self.n_envs} parallel environments...")
+            print(f"Creating {self.n_envs} parallel environments with EXTREME difficulty...")
             try:
                 env = SubprocVecEnv(
-                    [make_lunar_env(None, self.seed, i) for i in range(self.n_envs)],
+                    [make_lunar_env(extreme_config, self.seed, i) for i in range(self.n_envs)],
                     start_method='spawn'
                 )
                 print("✓ Parallel environments created successfully")
@@ -1071,10 +1086,9 @@ class UnifiedTrainer:
         else:
             env = self._normalize_env(env, training=True)
         
-        # Create eval environment with same factory pattern as training
+        # Create eval environment with same extreme difficulty as training
         # This ensures Basilisk path setup and proper initialization
-        eval_config = {'observation_mode': 'compact', 'max_episode_steps': 1000}
-        eval_env = DummyVecEnv([make_lunar_env(eval_config, self.seed, self.n_envs)])
+        eval_env = DummyVecEnv([make_lunar_env(extreme_config, self.seed, self.n_envs)])
         
         # Wrap with VecNormalize to match training env structure (required by SB3)
         if isinstance(env, VecNormalize):
@@ -1186,7 +1200,7 @@ class UnifiedTrainer:
     # MODE: CURRICULUM
     # ========================================================================
     
-    def curriculum_training(self, start_stage: int = 0, auto_advance: bool = True, resume: bool = False):
+    def curriculum_training(self, start_stage: int = 0, auto_advance: bool = True, resume: bool = False, auto_confirm: bool = False):
         """
         Full curriculum learning through all stages with IMPROVED advancement logic:
         - Requires both mean reward threshold AND 60% success rate
@@ -1198,6 +1212,7 @@ class UnifiedTrainer:
             start_stage: Starting stage index (0-based)
             auto_advance: Automatically advance stages based on performance
             resume: Try to resume from saved training state
+            auto_confirm: Skip manual confirmations and automatically proceed (-y flag)
         """
         print("\n" + "="*80)
         print("CURRICULUM LEARNING MODE (IMPROVED)")
@@ -1358,23 +1373,31 @@ class UnifiedTrainer:
                 else:
                     # Stage 1 failure - adjust expectations
                     print(f"⚠ Stage 1 not mastered after {stage_attempts[stage_idx]} attempts.")
-                    user_input = input("Continue to next stage anyway? (y/n): ")
+                    if auto_confirm:
+                        print("Auto-confirm enabled (-y): Advancing to next stage anyway...")
+                        stage_idx += 1
+                    else:
+                        user_input = input("Continue to next stage anyway? (y/n): ")
+                        if user_input.lower() == 'y':
+                            stage_idx += 1
+                        else:
+                            print("Training stopped by user.")
+                            break
+            else:
+                # Manual advancement
+                if auto_confirm:
+                    print("Auto-confirm enabled (-y): Advancing to next stage...")
+                    stage_idx += 1
+                else:
+                    user_input = input(f"Advance to next stage? (y/n/r for regress): ")
                     if user_input.lower() == 'y':
                         stage_idx += 1
+                    elif user_input.lower() == 'r' and stage_idx > 0:
+                        stage_idx -= 1
+                        print(f"Regressing to Stage {stage_idx + 1}...")
                     else:
                         print("Training stopped by user.")
                         break
-            else:
-                # Manual advancement
-                user_input = input(f"Advance to next stage? (y/n/r for regress): ")
-                if user_input.lower() == 'y':
-                    stage_idx += 1
-                elif user_input.lower() == 'r' and stage_idx > 0:
-                    stage_idx -= 1
-                    print(f"Regressing to Stage {stage_idx + 1}...")
-                else:
-                    print("Training stopped by user.")
-                    break
         
         # Save final curriculum model
         final_path = os.path.join(self.save_dir, 'curriculum_final')
@@ -1869,6 +1892,8 @@ Examples:
                        help='Disable automatic stage advancement')
     parser.add_argument('--resume-curriculum', action='store_true',
                        help='Resume curriculum training from saved state')
+    parser.add_argument('-y', '--auto-confirm', action='store_true',
+                       help='Automatically confirm stage advancements without prompts')
     
     # Paths
     parser.add_argument('--save-dir', type=str, default='./models',
@@ -1922,7 +1947,8 @@ Examples:
         trainer.curriculum_training(
             start_stage=args.start_stage,
             auto_advance=not args.no_auto_advance,
-            resume=args.resume is not None or args.resume_curriculum
+            resume=args.resume is not None or args.resume_curriculum,
+            auto_confirm=args.auto_confirm
         )
     
     elif args.mode == 'eval':
