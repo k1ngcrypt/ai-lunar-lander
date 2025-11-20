@@ -187,32 +187,24 @@ class LunarLanderEnv(gym.Env):
         else:
             self.terrain_config = terrain_config
         
-        # Define action space (15D): Comprehensive pilot-level control
+        # Define action space (15D) - Comprehensive pilot control
         # [primary_throttles (3), primary_gimbals (6), midbody_groups (3), rcs_groups (3)]
-        #
-        # Breakdown:
-        # - Indices 0-2:   Primary engine throttles [0.4-1.0] (3 Raptor engines)
-        # - Indices 3-8:   Primary engine gimbals [-0.14, 0.14] rad = ±8° (pitch, yaw per engine)
-        # - Indices 9-11:  Mid-body thruster groups [0, 1] (+X, +Y, +Z rotation control)
-        # - Indices 12-14: RCS thruster groups [0, 1] (pitch, yaw, roll authority)
         low = np.concatenate([
-            np.array([0.4, 0.4, 0.4]),  # Primary throttles (3)
-            np.array([-0.1396] * 6),     # Gimbal angles: ±8° = ±0.1396 rad (6)
-            np.array([0.0] * 3),         # Mid-body groups (3)
-            np.array([0.0] * 3)          # RCS groups (3)
+            np.array([0.4, 0.4, 0.4]),
+            np.array([-0.1396] * 6),     # ±8° = ±0.1396 rad
+            np.array([0.0] * 3),
+            np.array([0.0] * 3)
         ])
         high = np.concatenate([
-            np.array([1.0, 1.0, 1.0]),   # Primary throttles
-            np.array([0.1396] * 6),      # Gimbal angles
-            np.array([1.0] * 3),         # Mid-body groups
-            np.array([1.0] * 3)          # RCS groups
+            np.array([1.0, 1.0, 1.0]),
+            np.array([0.1396] * 6),
+            np.array([1.0] * 3),
+            np.array([1.0] * 3)
         ])
         self.action_space = spaces.Box(low=low, high=high, dtype=np.float32)
         
-        # Define observation space
         if self.observation_mode == 'compact':
-            # Compact: 32D observation vector
-            # pos(2), alt(1), vel(3), euler_angles(3), omega(3), fuel_frac(1),
+            # 32D: pos(2), alt(1), vel(3), euler(3), omega(3), fuel_frac(1),
             # fuel_flow(1), time_to_impact(1), lidar_stats(3), lidar_azimuthal(8),
             # imu_accel(3), imu_gyro(3)
             self.observation_space = spaces.Box(
@@ -222,21 +214,17 @@ class LunarLanderEnv(gym.Env):
                 dtype=np.float32
             )
         else:
-            # Full mode: finalized after simulation setup
             self.observation_space = None
         
-        # Target landing zone
         self.target_position = np.array([0.0, 0.0, 0.0])
         self.target_velocity = np.array([0.0, 0.0, 0.0])
         
-        # Simulation components (will be set in _create_simulation)
         self.scenario_initialized = False
         self.scSim = None
         self.lander = None
         self.aiSensors = None
         self.thrController = None
         
-        # Create terrain immediately (needed for reset even if sim is delayed)
         from terrain_simulation import LunarRegolithModel
         self.terrain = LunarRegolithModel(
             size=self.terrain_config['size'],
@@ -251,9 +239,7 @@ class LunarLanderEnv(gym.Env):
                 crater_radius_range=self.terrain_config['crater_radius_range']
             )
         
-        # Initial conditions storage (used by _create_simulation)
-        # NOTE: Default z-position is placeholder, will be set properly in reset()
-        # using MOON_RADIUS + terrain_height + altitude
+        # Initial conditions (z-position set properly in reset())
         self._initial_conditions = {
             'position': np.array([0.0, 0.0, SC.MOON_RADIUS + 1500.0]),
             'velocity': np.array([0.0, 0.0, -10.0]),
@@ -261,8 +247,6 @@ class LunarLanderEnv(gym.Env):
             'omega': np.zeros(3)
         }
         
-        # Initialize simulation (called only ONCE unless create_new_sim_on_reset=True)
-        # OR delay until first reset() if delay_sim_creation=True
         if not self.delay_sim_creation:
             self._create_simulation()
         
@@ -293,57 +277,40 @@ class LunarLanderEnv(gym.Env):
         print(f"Reset mode: {'CREATE_NEW' if self.create_new_sim_on_reset else 'REUSE'}")
         print(f"{'='*60}\n")
         
-        # Initialize thruster configuration for control allocation
         self._initialize_thruster_configuration()
     
     def _initialize_thruster_configuration(self):
         """
-        Initialize comprehensive thruster configuration for full pilot control.
+        Initialize thruster configuration for control allocation.
         
-        Configuration:
         - 3 primary engines: Differential thrust + gimbal (±8°)
-        - 12 mid-body thrusters: Grouped for +X, +Y, +Z rotation control
-        - 24 RCS thrusters: Grouped for pitch, yaw, roll authority
+        - 12 mid-body thrusters: +X, +Y, +Z rotation
+        - 24 RCS thrusters: pitch, yaw, roll
         """
-        # ===== PRIMARY ENGINES =====
-        # Already configured via Basilisk thrusterStateEffector
-        
-        # ===== MID-BODY THRUSTERS =====
-        # 12 thrusters arranged radially at z=0, firing tangentially
         self.midbody_positions_B = np.array(SC.MIDBODY_THRUSTER_POSITIONS, dtype=np.float32)
         self.midbody_directions_B = np.zeros((SC.MIDBODY_THRUSTER_COUNT, 3), dtype=np.float32)
         for i in range(SC.MIDBODY_THRUSTER_COUNT):
             direction = SC.get_midbody_thruster_direction(self.midbody_positions_B[i])
             self.midbody_directions_B[i] = direction
         
-        # Group mid-body thrusters by rotation axis contribution
-        # +X rotation (roll): thrusters with +Y/-Y components
-        # +Y rotation (pitch): thrusters with +X/-X components  
-        # +Z rotation (yaw): all thrusters contribute
         self.midbody_groups = {
-            'roll': [1, 2, 3, 4, 7, 8, 9, 10],    # Y-axis aligned thrusters
-            'pitch': [0, 1, 5, 6, 7, 11],          # X-axis aligned thrusters
-            'yaw': list(range(12))                  # All contribute to yaw
+            'roll': [1, 2, 3, 4, 7, 8, 9, 10],
+            'pitch': [0, 1, 5, 6, 7, 11],
+            'yaw': list(range(12))
         }
         
-        # ===== RCS THRUSTERS =====
-        # 24 thrusters: 12 at top ring (z=22.5m), 12 at bottom (z=-22.5m)
         self.rcs_positions_B = np.array(SC.RCS_THRUSTER_POSITIONS, dtype=np.float32)
         self.rcs_directions_B = np.zeros((SC.RCS_THRUSTER_COUNT, 3), dtype=np.float32)
         for i in range(SC.RCS_THRUSTER_COUNT):
             direction = SC.get_rcs_thruster_direction(self.rcs_positions_B[i])
             self.rcs_directions_B[i] = direction
         
-        # Group RCS thrusters by rotation axis
-        # Top ring (0-11) vs bottom ring (12-23) for pitch/yaw
-        # Opposite firing pairs for roll
         self.rcs_groups = {
-            'pitch': list(range(0, 12)) + list(range(12, 24)),  # All thrusters
-            'yaw': list(range(0, 12)) + list(range(12, 24)),    # All thrusters
-            'roll': list(range(0, 12)) + list(range(12, 24))    # All thrusters
+            'pitch': list(range(0, 12)) + list(range(12, 24)),
+            'yaw': list(range(0, 12)) + list(range(12, 24)),
+            'roll': list(range(0, 12)) + list(range(12, 24))
         }
         
-        # Pre-compute moment arms for RCS allocation
         self.rcs_moment_arms = np.zeros((SC.RCS_THRUSTER_COUNT, 3), dtype=np.float32)
         for i in range(SC.RCS_THRUSTER_COUNT):
             force = self.rcs_directions_B[i] * SC.RCS_THRUST
@@ -351,9 +318,9 @@ class LunarLanderEnv(gym.Env):
     
     def _map_midbody_groups(self, groups):
         """
-        Map mid-body thruster group commands to individual thruster throttles.
+        Map mid-body thruster group commands to individual throttles.
         
-        Groups control rotation about principal axes:
+        groups[0]: Roll, groups[1]: Pitch, groups[2]: Yaw
         - groups[0]: Roll control (+X rotation)
         - groups[1]: Pitch control (+Y rotation)
         - groups[2]: Yaw control (+Z rotation)
