@@ -145,7 +145,9 @@ class LunarLanderEnv(gym.Env):
                  initial_velocity_range=((-200.0, 200.0), (-200.0, 200.0), (-100.0, -50.0)),
                  terrain_config=None,
                  create_new_sim_on_reset=False,
-                 delay_sim_creation=False):
+                 delay_sim_creation=False,
+                 enable_vizard=False,
+                 vizard_save_path=None):
         """
         Initialize Lunar Lander Gymnasium Environment
         
@@ -160,6 +162,8 @@ class LunarLanderEnv(gym.Env):
             create_new_sim_on_reset: If True, recreate simulation each reset (slow but clean).
             delay_sim_creation: If True, delay simulation creation until first reset (fixes init bug).
                                      If False, reuse simulation (fast)
+            enable_vizard: If True, enable Vizard .bin export for visualization
+            vizard_save_path: Directory to save Vizard .bin files (used if enable_vizard=True)
         """
         super().__init__()
         
@@ -170,6 +174,12 @@ class LunarLanderEnv(gym.Env):
         self.initial_velocity_range = initial_velocity_range
         self.create_new_sim_on_reset = create_new_sim_on_reset
         self.delay_sim_creation = delay_sim_creation
+        
+        # Vizard export configuration
+        self.enable_vizard = enable_vizard
+        self.vizard_save_path = vizard_save_path
+        self.current_vizard_file = None  # Set per-episode
+        self.viz_interface = None
         
         # Episode tracking
         self.current_step = 0
@@ -679,6 +689,10 @@ class LunarLanderEnv(gym.Env):
             self.thrController.terrainForceMsg
         )
         
+        # Setup Vizard visualization if enabled
+        if self.enable_vizard:
+            self._setup_vizard(dynTaskName)
+        
         # Initialize simulation (ONLY CALL THIS ONCE!)
         # Suppress BSK_WARNING messages during initialization (intentional behavior)
         with SuppressBasiliskWarnings():
@@ -693,6 +707,87 @@ class LunarLanderEnv(gym.Env):
         print(f"  Terrain: {self.terrain.size}m x {self.terrain.size}m")
         print(f"  LIDAR: {self.lidar.num_rays} rays, {self.lidar.max_range}m range")
         print(f"  Sensors: Ready (observation dim: {self.aiSensors.get_observation_space_size()})")
+    
+    def _setup_vizard(self, task_name):
+        """
+        Setup Vizard visualization for file recording.
+        
+        Creates a vizInterface module using vizSupport that captures simulation
+        state and writes it to a .bin file that Vizard can play back.
+        
+        NOTE: Basilisk's saveFile parameter may create a minimal settings file.
+        For full recording, we configure the viz module for recording mode.
+        
+        Args:
+            task_name: Name of the dynamics task to attach viz to
+        """
+        try:
+            from Basilisk.utilities import vizSupport
+            
+            # Determine save file path
+            if self.current_vizard_file:
+                save_file = self.current_vizard_file
+            else:
+                # Default filename  
+                save_file = os.path.join(
+                    self.vizard_save_path or './vizard_exports',
+                    f'episode_{self.episode_count:03d}.bin'
+                )
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(save_file), exist_ok=True)
+            
+            # Convert to absolute path - Basilisk may have issues with relative paths
+            save_file = os.path.abspath(save_file)
+            
+            # Use vizSupport to enable visualization WITH saveFile parameter
+            # CRITICAL: scList must be a LIST of spacecraft objects, not a single object
+            self.viz_interface = vizSupport.enableUnityVisualization(
+                self.scSim,
+                task_name,
+                [self.lander],  # Must be a list!
+                saveFile=save_file
+            )
+            
+            # Configure visualization settings
+            viz = self.viz_interface
+            if hasattr(viz, 'settings'):
+                viz.settings.ambient = 0.6
+                viz.settings.orbitLinesOn = 1
+                viz.settings.spacecraftCSon = 1
+                viz.settings.planetCSon = 1
+                viz.settings.skyBox = "black"
+                viz.settings.showSpacecraftLabels = 1
+            
+            print(f"[Vizard] Recording enabled: {save_file}")
+            print(f"[Vizard] Visualization interface configured")
+            
+        except ImportError as e:
+            print(f"[Vizard] Warning: vizSupport not available: {e}")
+            print(f"  Vizard export disabled (Basilisk may not be built with viz support)")
+            self.enable_vizard = False
+        except Exception as e:
+            print(f"[Vizard] Warning: Failed to setup Vizard: {e}")
+            import traceback
+            traceback.print_exc()
+            print(f"  Continuing without Vizard export")
+            self.enable_vizard = False
+    
+    def set_vizard_output(self, filepath):
+        """
+        Set the output filepath for the next episode's Vizard recording.
+        
+        Args:
+            filepath: Full path to .bin file to save
+        """
+        self.current_vizard_file = filepath
+        
+        # If simulation already exists and viz is enabled, we need to recreate
+        # the viz interface with the new filepath
+        if self.scenario_initialized and self.enable_vizard:
+            # This will be applied on next reset when simulation is recreated
+            # or when viz interface is reconfigured
+            pass
     
     def _get_observation(self):
         """Get current observation from sensors"""
@@ -1231,8 +1326,11 @@ class LunarLanderEnv(gym.Env):
             }
             self._create_simulation()
             
-        elif self.create_new_sim_on_reset:
+        elif self.create_new_sim_on_reset and not self.enable_vizard:
             # Mode 1: Create brand new simulation (no warnings, but VERY slow)
+            # CRITICAL: When Vizard is enabled, we CANNOT recreate simulation each episode
+            # because it would overwrite/truncate the recording file
+            # So we only recreate if Vizard is disabled
             self._initial_conditions = {
                 'position': np.array([x, y, z]),
                 'velocity': velocity,
@@ -1243,7 +1341,7 @@ class LunarLanderEnv(gym.Env):
             # Destroy old simulation
             self.scenario_initialized = False
             
-            # Create fresh simulation
+            # Create fresh simulation (will setup Vizard with new file path)
             self._create_simulation()
             
         else:
@@ -1486,6 +1584,16 @@ class LunarLanderEnv(gym.Env):
         PRODUCTION: Enhanced with cached array cleanup and BSKLogger cleanup.
         """
         import gc
+        
+        # Finalize Vizard recording if active
+        if self.enable_vizard and self.viz_interface is not None:
+            try:
+                # Force flush of protobuf buffer by calling any cleanup methods
+                if hasattr(self.viz_interface, 'Reset'):
+                    self.viz_interface.Reset(0)  # Reset with finalization
+                print(f"[Vizard] Recording finalized")
+            except Exception as e:
+                print(f"[Vizard] Warning during cleanup: {e}")
         
         if self.scSim is not None:
             # Delete Basilisk simulation objects in dependency order

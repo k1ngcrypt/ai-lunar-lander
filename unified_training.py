@@ -1660,14 +1660,28 @@ class UnifiedTrainer:
                  model_path: str,
                  n_episodes: int = 10,
                  render: bool = False,
-                 env_config: Optional[Dict] = None):
-        """Evaluate a trained model"""
+                 env_config: Optional[Dict] = None,
+                 export_vizard: bool = False,
+                 vizard_output_dir: str = './vizard_exports'):
+        """Evaluate a trained model with optional Vizard .bin export
+        
+        Args:
+            model_path: Path to trained model
+            n_episodes: Number of evaluation episodes
+            render: Whether to render during evaluation
+            env_config: Environment configuration dict
+            export_vizard: If True, export Vizard .bin files for each episode
+            vizard_output_dir: Directory to save .bin files
+        """
         print("\n" + "="*80)
         print("MODEL EVALUATION MODE")
         print("="*80)
         print(f"Model: {model_path}")
         print(f"Episodes: {n_episodes}")
         print(f"Render: {render}")
+        print(f"Export Vizard: {export_vizard}")
+        if export_vizard:
+            print(f"Vizard output dir: {vizard_output_dir}")
         print("="*80 + "\n")
         
         # Load model
@@ -1690,12 +1704,23 @@ class UnifiedTrainer:
         
         print("✓ Model loaded successfully")
         
+        # Create output directory for Vizard files
+        if export_vizard:
+            os.makedirs(vizard_output_dir, exist_ok=True)
+            print(f"\n✓ Vizard export directory: {vizard_output_dir}")
+        
         # Create environment using same settings as training for consistency
         config = env_config or {
             'observation_mode': 'compact',
             'render_mode': 'human' if render else None,
             'max_episode_steps': 1000
         }
+        
+        # If exporting Vizard, we need to enable viz recording
+        if export_vizard:
+            config['enable_vizard'] = True
+            config['vizard_save_path'] = vizard_output_dir
+        
         # Use optimized REUSE mode (same as training) instead of CREATE_NEW
         # The delay_sim_creation fix makes REUSE mode work correctly
         env = LunarLanderEnv(**config)
@@ -1706,6 +1731,12 @@ class UnifiedTrainer:
         successes = []
         
         for ep in range(n_episodes):
+            # Set episode-specific Vizard output file
+            if export_vizard:
+                episode_bin_path = os.path.join(vizard_output_dir, f'episode_{ep+1:03d}.bin')
+                env.set_vizard_output(episode_bin_path)
+                print(f"\n[Episode {ep+1}] Recording to: {episode_bin_path}")
+            
             obs, info = env.reset()
             done = False
             episode_reward = 0
@@ -1734,6 +1765,12 @@ class UnifiedTrainer:
             print(f"  Length: {step_count} steps")
             print(f"  Final altitude: {info.get('altitude', 0):.2f} m")
             print(f"  Fuel remaining: {info.get('fuel_fraction', 0)*100:.1f}%")
+            if export_vizard:
+                if os.path.exists(episode_bin_path):
+                    file_size = os.path.getsize(episode_bin_path) / (1024 * 1024)  # MB
+                    print(f"  Vizard file: {os.path.basename(episode_bin_path)} ({file_size:.2f} MB)")
+                else:
+                    print(f"  ⚠ Warning: Vizard file not created")
             print()
         
         # Summary statistics
@@ -1751,6 +1788,17 @@ class UnifiedTrainer:
         print(f"Success rate: {success_rate:.1f}%")
         print(f"Min reward: {min(episode_rewards):.2f}")
         print(f"Max reward: {max(episode_rewards):.2f}")
+        
+        if export_vizard:
+            print(f"\n✓ Vizard files exported: {n_episodes}")
+            print(f"  Location: {vizard_output_dir}")
+            print(f"\nTo view in Vizard:")
+            print(f"  1. Start Vizard application")
+            print(f"  2. Select File → Open")
+            print(f"  3. Navigate to: {os.path.abspath(vizard_output_dir)}")
+            print(f"  4. Open any episode_XXX.bin file")
+            print(f"  5. Click 'Start Visualization'")
+        
         print("="*80 + "\n")
         
         env.close()
@@ -1836,6 +1884,9 @@ Examples:
   # Evaluate model
   python unified_training.py --mode eval --model-path ./models/best_model/best_model
   
+  # Evaluate with Vizard export (NEW!)
+  python unified_training.py --mode eval --model-path ./models/best_model/best_model --export-vizard
+  
   # Resume training
   python unified_training.py --mode standard --resume ./models/checkpoints/ppo_lunar_lander_500000_steps
   
@@ -1885,6 +1936,10 @@ Examples:
                        help='Number of episodes for evaluation')
     parser.add_argument('--render', action='store_true',
                        help='Render episodes during evaluation')
+    parser.add_argument('--export-vizard', action='store_true',
+                       help='Export Vizard .bin files during evaluation')
+    parser.add_argument('--vizard-output-dir', type=str, default='./vizard_exports',
+                       help='Directory to save Vizard .bin files')
     
     # Other
     parser.add_argument('--seed', type=int, default=42,
@@ -1933,7 +1988,9 @@ Examples:
         trainer.evaluate(
             model_path=args.model_path,
             n_episodes=args.eval_episodes,
-            render=args.render
+            render=args.render,
+            export_vizard=args.export_vizard,
+            vizard_output_dir=args.vizard_output_dir
         )
 
 

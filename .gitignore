@@ -8,3 +8,4 @@ logs/
 models/
 !basilisk/build_basilisk.bat
 vizard/
+test_vizard_output/

@@ -110,12 +110,14 @@ tensorboard --logdir=./logs
 │
 ├── README.md                        # 📖 This file - quick start guide
 ├── REWARD_SYSTEM_GUIDE.md           # 🎁 Comprehensive reward system documentation
+├── VIZARD_EXPORT_GUIDE.md           # 🎬 3D visualization export guide (NEW!)
 ├── PRODUCTION_CHECKLIST.md          # ✅ Production deployment guide
 │
 ├── basilisk/                        # Astrodynamics simulation framework
 ├── generated_terrain/               # Generated terrain heightmaps
 ├── models/                          # Saved trained models
-└── logs/                            # TensorBoard logs
+├── logs/                            # TensorBoard logs
+└── vizard_exports/                  # Vizard .bin files (3D playback)
 ```
 
 ---
@@ -146,7 +148,39 @@ python unified_training.py --mode eval --model-path ./models/best_model/best_mod
 
 # Evaluate with visualization
 python unified_training.py --mode eval --model-path ./models/best_model/best_model --render
+
+# Export Vizard .bin files for 3D visualization (NEW!)
+python unified_training.py --mode eval --model-path ./models/best_model/best_model --export-vizard --eval-episodes 10
 ```
+
+---
+
+## 🎬 Vizard 3D Visualization Export
+
+**NEW FEATURE**: Export evaluation episodes as Vizard-compatible `.bin` files for 3D playback!
+
+```bash
+# Export 10 landing episodes for Vizard visualization
+python unified_training.py --mode eval \
+    --model-path ./models/curriculum_final \
+    --export-vizard \
+    --vizard-output-dir ./vizard_exports \
+    --eval-episodes 10
+```
+
+**View in Vizard:**
+1. Open Vizard application
+2. Select File → Open
+3. Choose any `episode_XXX.bin` file from `vizard_exports/`
+4. Click "Start Visualization"
+
+**Use cases:**
+- 🎥 Create demonstration videos
+- 🐛 Debug landing failures in 3D
+- 📊 Analyze trajectory patterns
+- 🎓 Educational presentations
+
+**📖 See [VIZARD_EXPORT_GUIDE.md](VIZARD_EXPORT_GUIDE.md) for complete documentation**
 
 ---
 
