@@ -2,13 +2,13 @@
 generate_terrain.py
 Realistic lunar terrain generator for the lander simulation
 
-Features physically-accurate lunar surface characteristics:
-- Power-law crater size-frequency distribution (observed on the Moon)
-- Realistic crater morphology (simple/complex craters with central peaks, terraced walls)
+Features physically-accurate lunar surface:
+- Power-law crater size-frequency distribution
+- Realistic crater morphology (simple/complex with central peaks, terraced walls)
 - Boulder fields and ejecta blankets
 - Regolith layering and micro-topography
 - Mare vs. Highland terrain types
-- Fractal terrain using Perlin noise for natural appearance
+- Fractal terrain using Perlin noise
 
 Usage:
     python generate_terrain.py --output generated_terrain/moon_terrain.npy --size 2000 --resolution 200 --terrain-type mare
@@ -25,20 +25,19 @@ def perlin_noise_2d(shape, scale=10.0, octaves=6, persistence=0.5, lacunarity=2.
     
     Args:
         shape: (height, width) of output array
-        scale: Base wavelength of noise
+        scale: Base wavelength
         octaves: Number of noise layers (more = more detail)
         persistence: Amplitude decrease per octave
         lacunarity: Frequency increase per octave
         seed: Random seed
         
     Returns:
-        2D array of Perlin noise values [-1, 1]
+        2D array of Perlin noise [-1, 1]
     """
     if seed is not None:
         np.random.seed(seed)
     
     def gradient(h, x, y):
-        """Generate gradient vectors"""
         vectors = np.array([[1,1], [-1,1], [1,-1], [-1,-1], 
                            [1,0], [-1,0], [0,1], [0,-1]])
         g = vectors[h % 8]
@@ -51,22 +50,18 @@ def perlin_noise_2d(shape, scale=10.0, octaves=6, persistence=0.5, lacunarity=2.
     max_value = 0.0
     
     for octave in range(octaves):
-        # Generate gradient grid for this octave
         grid_height = int(height / scale * frequency) + 2
         grid_width = int(width / scale * frequency) + 2
         
-        # Simple hash-based gradients
         grad_grid = np.random.randint(0, 8, size=(grid_height, grid_width))
         
-        # Sample positions
         y_coords = np.linspace(0, grid_height - 1, height)
         x_coords = np.linspace(0, grid_width - 1, width)
         
-        # Simple interpolated noise (simplified Perlin)
         y_idx = np.floor(y_coords).astype(int)
         x_idx = np.floor(x_coords).astype(int)
         
-        octave_noise = np.random.randn(height, width) * 0.5  # Fallback to Gaussian
+        octave_noise = np.random.randn(height, width) * 0.5
         
         noise += octave_noise * amplitude
         max_value += amplitude
@@ -74,7 +69,6 @@ def perlin_noise_2d(shape, scale=10.0, octaves=6, persistence=0.5, lacunarity=2.
         amplitude *= persistence
         frequency *= lacunarity
     
-    # Normalize to [-1, 1]
     if max_value > 0:
         noise /= max_value
     
@@ -103,43 +97,33 @@ def generate_realistic_crater(X, Y, center_x, center_y, diameter, depth_diameter
     radius = diameter / 2.0
     depth = diameter * depth_diameter_ratio
     
-    # Distance from crater center
     dist = np.sqrt((X - center_x)**2 + (Y - center_y)**2)
     
-    # Initialize heightmap
     heightmap = np.zeros_like(X)
     
-    # 1. Main crater bowl/depression
-    # Use parabolic profile for simple craters, flatter for complex
     crater_mask = dist <= radius
     
     if is_complex:
-        # Complex crater: flat floor with wall slope
         floor_radius = radius * 0.4
         wall_start = radius * 0.5
         
-        # Flat floor
         floor_mask = dist <= floor_radius
         heightmap[floor_mask] = -depth
         
-        # Terraced walls (multiple steps)
         wall_mask = (dist > floor_radius) & (dist <= radius)
         wall_dist = (dist[wall_mask] - floor_radius) / (radius - floor_radius)
         
-        # Add 3-4 terraces
         num_terraces = 4
         terrace_profile = np.zeros_like(wall_dist)
         for i in range(num_terraces):
             terrace_pos = (i + 1) / num_terraces
             terrace_height = -depth * (1 - terrace_pos * 0.7)
-            # Smoothstep for each terrace
             t = np.clip((wall_dist - terrace_pos) * num_terraces * 2, -1, 1)
             terrace_smooth = 0.5 * (1 + np.tanh(t * 3))
             terrace_profile += terrace_height * terrace_smooth / num_terraces
         
         heightmap[wall_mask] = terrace_profile
         
-        # Central peak (10-20% of crater depth)
         peak_radius = radius * 0.15
         peak_height = depth * 0.15
         peak_mask = dist <= peak_radius
@@ -147,12 +131,10 @@ def generate_realistic_crater(X, Y, center_x, center_y, diameter, depth_diameter
         heightmap[peak_mask] += peak_profile
         
     else:
-        # Simple crater: parabolic bowl
         normalized_dist = dist[crater_mask] / radius
         crater_profile = -depth * (1 - normalized_dist**2)
         heightmap[crater_mask] = crater_profile
     
-    # 2. Raised rim (10-15% of depth)
     rim_height = depth * 0.12
     rim_width = radius * 0.1
     rim_outer = radius + rim_width
@@ -162,14 +144,12 @@ def generate_realistic_crater(X, Y, center_x, center_y, diameter, depth_diameter
     rim_profile = rim_height * np.exp(-((rim_dist - 0.3) / 0.4)**2)
     heightmap[rim_mask] += rim_profile
     
-    # 3. Ejecta blanket (gradually thinning debris field)
     ejecta_outer = radius * ejecta_range
     ejecta_mask = (dist > rim_outer) & (dist <= ejecta_outer)
     
     ejecta_dist = (dist[ejecta_mask] - rim_outer) / (ejecta_outer - rim_outer)
     ejecta_thickness = rim_height * 0.3 * (1 - ejecta_dist)**2
     
-    # Add randomness to ejecta (not uniform)
     ejecta_noise = np.random.randn(np.sum(ejecta_mask)) * ejecta_thickness.mean() * 0.3
     heightmap[ejecta_mask] = ejecta_thickness + ejecta_noise
     
@@ -179,14 +159,14 @@ def generate_realistic_crater(X, Y, center_x, center_y, diameter, depth_diameter
 def add_boulder_field(X, Y, num_boulders, boulder_size_range=(0.5, 5.0), 
                       region_center=None, region_radius=None, seed=None):
     """
-    Add scattered boulders to terrain (common near crater rims and ejecta).
+    Add scattered boulders to terrain (common near crater rims/ejecta).
     
     Args:
         X, Y: Meshgrid coordinates
         num_boulders: Number of boulders to place
-        boulder_size_range: (min, max) boulder diameter in meters
+        boulder_size_range: (min, max) diameter in meters
         region_center: (x, y) center of boulder field, or None for random
-        region_radius: Radius of boulder concentration, or None for full terrain
+        region_radius: Radius of concentration, or None for full terrain
         seed: Random seed
         
     Returns:
@@ -198,26 +178,21 @@ def add_boulder_field(X, Y, num_boulders, boulder_size_range=(0.5, 5.0),
     heightmap = np.zeros_like(X)
     
     for _ in range(num_boulders):
-        # Boulder size (power-law distribution - more small boulders)
-        size_exponent = np.random.power(2.5)  # Power law
+        size_exponent = np.random.power(2.5)
         boulder_diameter = boulder_size_range[0] + size_exponent * (boulder_size_range[1] - boulder_size_range[0])
-        boulder_height = boulder_diameter * 0.7  # Boulders are somewhat spherical
+        boulder_height = boulder_diameter * 0.7
         
-        # Boulder position
         if region_center is not None and region_radius is not None:
-            # Place within specified region
             angle = np.random.uniform(0, 2 * np.pi)
             r = np.sqrt(np.random.uniform(0, 1)) * region_radius
             bx = region_center[0] + r * np.cos(angle)
             by = region_center[1] + r * np.sin(angle)
         else:
-            # Random placement
             x_range = X.max() - X.min()
             y_range = Y.max() - Y.min()
             bx = X.min() + np.random.uniform(0.1, 0.9) * x_range
             by = Y.min() + np.random.uniform(0.1, 0.9) * y_range
         
-        # Add boulder (Gaussian bump)
         dist = np.sqrt((X - bx)**2 + (Y - by)**2)
         boulder_radius = boulder_diameter / 2.0
         boulder_mask = dist <= boulder_radius * 1.5
@@ -233,27 +208,27 @@ def generate_lunar_terrain(size=2000.0, resolution=200, num_craters=20,
                           noise_scale=0.2, seed=None, terrain_type='mare',
                           include_boulders=True, realism_level='high'):
     """
-    Generate realistic procedural lunar terrain with advanced features.
+    Generate realistic procedural lunar terrain.
     
     Terrain types:
     - 'mare': Smooth volcanic plains (fewer craters, gentle slopes)
     - 'highland': Ancient cratered terrain (heavily cratered, rough)
-    - 'mixed': Combination of mare and highland features
+    - 'mixed': Combination of mare and highland
     
     Args:
         size: Terrain size in meters (square)
         resolution: Grid resolution (cells per side)
         num_craters: Number of primary impact craters
-        crater_depth_range: (min, max) crater depth in meters
-        crater_radius_range: (min, max) crater radius in meters
-        noise_scale: Scale of micro-topography (meters)
-        seed: Random seed for reproducibility
+        crater_depth_range: (min, max) depth in meters
+        crater_radius_range: (min, max) radius in meters
+        noise_scale: Micro-topography scale (meters)
+        seed: Random seed
         terrain_type: 'mare', 'highland', or 'mixed'
         include_boulders: Whether to add boulder fields
-        realism_level: 'basic', 'medium', 'high' (affects computation time)
+        realism_level: 'basic', 'medium', 'high'
     
     Returns:
-        heightmap: 2D numpy array of height values (resolution x resolution)
+        heightmap: 2D array of heights (resolution x resolution)
     """
     if seed is not None:
         np.random.seed(seed)
@@ -264,30 +239,25 @@ def generate_lunar_terrain(size=2000.0, resolution=200, num_craters=20,
     print(f"  Resolution: {resolution} x {resolution}")
     print(f"  Realism level: {realism_level}")
     
-    # Create coordinate grid
     x = np.linspace(-size/2, size/2, resolution)
     y = np.linspace(-size/2, size/2, resolution)
     X, Y = np.meshgrid(x, y)
     
-    # Adjust parameters based on terrain type
     if terrain_type == 'mare':
-        # Smooth lava plains
-        num_craters = int(num_craters * 0.5)  # Fewer craters
+        num_craters = int(num_craters * 0.5)
         base_roughness = 0.15
         large_scale_amp = 2.0
         print(f"  Mare terrain: {num_craters} craters (reduced)")
     elif terrain_type == 'highland':
-        # Ancient heavily cratered
-        num_craters = int(num_craters * 2.0)  # More craters
+        num_craters = int(num_craters * 2.0)
         base_roughness = 0.4
         large_scale_amp = 5.0
         print(f"  Highland terrain: {num_craters} craters (increased)")
-    else:  # mixed
+    else:
         base_roughness = 0.25
         large_scale_amp = 3.5
         print(f"  Mixed terrain: {num_craters} craters")
     
-    # Start with base elevation (Perlin noise for natural undulation)
     print("  Generating base topography...")
     if realism_level in ['medium', 'high']:
         base_terrain = perlin_noise_2d(
@@ -328,24 +298,19 @@ def generate_lunar_terrain(size=2000.0, resolution=200, num_craters=20,
     # Sort by size (place largest first to avoid overlap issues)
     crater_diameters.sort(reverse=True)
     
-    # Add craters with realistic morphology
     print("  Generating craters with realistic morphology...")
     crater_positions = []
     
     for i, diameter in enumerate(crater_diameters):
-        # Determine if complex crater (>300m diameter ~ scaled from 15km lunar threshold)
         is_complex = diameter > 300 if realism_level == 'high' else False
         
-        # Random position (avoid edges)
         margin = diameter
         cx = np.random.uniform(-size/2 + margin, size/2 - margin)
         cy = np.random.uniform(-size/2 + margin, size/2 - margin)
         
-        # Degradation (older craters are shallower)
-        age_factor = np.random.uniform(0.5, 1.0)  # 0.5 = very old/degraded
+        age_factor = np.random.uniform(0.5, 1.0)
         depth_ratio = 0.2 * age_factor
         
-        # Generate crater
         crater = generate_realistic_crater(
             X, Y, cx, cy, diameter, 
             depth_diameter_ratio=depth_ratio,
@@ -359,14 +324,13 @@ def generate_lunar_terrain(size=2000.0, resolution=200, num_craters=20,
         if (i + 1) % 10 == 0:
             print(f"    Created {i+1}/{num_craters} craters...")
     
-    # Add boulder fields near large craters
     if include_boulders and realism_level in ['medium', 'high']:
         print("  Adding boulder fields...")
         total_boulders = 0
         
-        for cx, cy, diameter in crater_positions[:int(num_craters * 0.3)]:  # Top 30% of craters
-            if diameter > 50:  # Only large craters have significant boulders
-                num_boulders = int(diameter / 10)  # Scale with crater size
+        for cx, cy, diameter in crater_positions[:int(num_craters * 0.3)]:
+            if diameter > 50:
+                num_boulders = int(diameter / 10)
                 boulder_field = add_boulder_field(
                     X, Y, num_boulders,
                     boulder_size_range=(0.5, min(5.0, diameter/20)),
@@ -378,21 +342,17 @@ def generate_lunar_terrain(size=2000.0, resolution=200, num_craters=20,
         
         print(f"    Added {total_boulders} boulders")
     
-    # Add regolith micro-topography (small-scale roughness)
     print("  Adding regolith micro-topography...")
     if realism_level == 'high':
-        # Multi-scale roughness
         micro_rough = np.zeros_like(heightmap)
         for scale in [0.5, 0.2, 0.1]:
             layer = np.random.normal(0, noise_scale * scale, (resolution, resolution))
             micro_rough += layer
         heightmap += micro_rough
     else:
-        # Simple Gaussian noise
         roughness = np.random.normal(0, base_roughness, (resolution, resolution))
         heightmap += roughness
     
-    # Add small secondary craters (from ejecta impacts)
     if realism_level == 'high':
         print("  Adding secondary craters...")
         num_secondaries = num_craters * 5
@@ -400,7 +360,7 @@ def generate_lunar_terrain(size=2000.0, resolution=200, num_craters=20,
             sec_diameter = np.random.uniform(2, 10)
             sec_cx = np.random.uniform(-size/2, size/2)
             sec_cy = np.random.uniform(-size/2, size/2)
-            sec_depth_ratio = np.random.uniform(0.05, 0.15)  # Shallower than primaries
+            sec_depth_ratio = np.random.uniform(0.05, 0.15)
             
             sec_crater = generate_realistic_crater(
                 X, Y, sec_cx, sec_cy, sec_diameter,
@@ -408,7 +368,7 @@ def generate_lunar_terrain(size=2000.0, resolution=200, num_craters=20,
                 is_complex=False,
                 ejecta_range=1.2
             )
-            heightmap += sec_crater * 0.5  # Reduced influence
+            heightmap += sec_crater * 0.5
     
     print(f"  Height range: [{np.min(heightmap):.2f}, {np.max(heightmap):.2f}] m")
     print(f"  Mean elevation: {np.mean(heightmap):.2f} m")
@@ -443,7 +403,6 @@ def main():
     
     args = parser.parse_args()
     
-    # Generate terrain with new realistic features
     heightmap = generate_lunar_terrain(
         size=args.size,
         resolution=args.resolution,
@@ -454,13 +413,11 @@ def main():
         realism_level=args.realism
     )
     
-    # Create output directory if it doesn't exist
     output_dir = os.path.dirname(args.output)
     if output_dir and not os.path.exists(output_dir):
         os.makedirs(output_dir)
         print(f"Created directory: {output_dir}")
     
-    # Save terrain
     if args.output.endswith('.npy'):
         np.save(args.output, heightmap)
         print(f"✓ Saved terrain to: {args.output}")
@@ -471,7 +428,6 @@ def main():
         print("⚠ Unknown file format, saving as .npy")
         np.save(args.output + '.npy', heightmap)
     
-    # Visualize if requested
     if args.visualize:
         try:
             import matplotlib.pyplot as plt
