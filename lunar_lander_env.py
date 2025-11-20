@@ -281,8 +281,10 @@ class LunarLanderEnv(gym.Env):
             )
         
         # Initial conditions storage (used by _create_simulation)
+        # NOTE: Default z-position is placeholder, will be set properly in reset()
+        # using MOON_RADIUS + terrain_height + altitude
         self._initial_conditions = {
-            'position': np.array([0.0, 0.0, 1500.0]),
+            'position': np.array([0.0, 0.0, SC.MOON_RADIUS + 1500.0]),
             'velocity': np.array([0.0, 0.0, -10.0]),
             'attitude_mrp': np.array([0.0, 0.0, 0.0]),
             'omega': np.zeros(3)
@@ -528,6 +530,7 @@ class LunarLanderEnv(gym.Env):
         self.lander.hub.r_BcB_B = SC.CENTER_OF_MASS_OFFSET
         self.lander.hub.IHubPntBc_B = SC.INERTIA_TENSOR_FULL
         # Use stored initial conditions
+        # NOTE: Positions already include MOON_RADIUS from _create_simulation setup
         self.lander.hub.r_CN_NInit = self._initial_conditions['position']
         self.lander.hub.v_CN_NInit = self._initial_conditions['velocity']
         self.lander.hub.sigma_BNInit = self._initial_conditions['attitude_mrp']
@@ -1190,7 +1193,11 @@ class LunarLanderEnv(gym.Env):
         
         # Get terrain height at (x, y)
         terrain_height = self.terrain.get_height(x, y)
-        z = terrain_height + altitude
+        
+        # CRITICAL: Basilisk uses Moon-centered inertial frame
+        # Position = Moon radius + local terrain height + altitude above terrain
+        # Moon radius from Basilisk gravity model
+        z = SC.MOON_RADIUS + terrain_height + altitude
         
         # Suborbital trajectory velocity (realistic for lunar descent from 20km)
         # Horizontal velocity dominates, with downward component

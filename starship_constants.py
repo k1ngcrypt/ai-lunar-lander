@@ -15,6 +15,15 @@ STARSHIP HLS CONFIGURATION:
 import numpy as np
 
 # ==============================================================================
+# CELESTIAL BODY CONSTANTS
+# ==============================================================================
+
+# Moon radius (from Basilisk's gravBodyFactory.createMoon())
+# CRITICAL: Basilisk uses Moon-centered inertial coordinates
+# All positions in simulation are: z = MOON_RADIUS + terrain_height + altitude
+MOON_RADIUS = 1737400.0  # meters (mean radius of the Moon)
+
+# ==============================================================================
 # MASS PROPERTIES
 # ==============================================================================
 

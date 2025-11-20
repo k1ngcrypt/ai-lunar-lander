@@ -328,9 +328,10 @@ class AISensorSuite:
         
         # --- TERRAIN-RELATIVE MEASUREMENTS ---
         # Altitude above local terrain (not just inertial Z)
+        # CRITICAL: position_N is in Moon-centered inertial frame (includes Moon radius)
         x, y, z = position_N
         terrain_height = self.terrain.get_height(x, y)
-        altitude_terrain = z - terrain_height  # meters above local terrain
+        altitude_terrain = z - SC.MOON_RADIUS - terrain_height  # meters above local terrain
         
         # Vertical velocity (project velocity onto local "up" direction)
         # For flat terrain, this is just velocity_N[2]
@@ -638,12 +639,15 @@ class AdvancedThrusterController:
         """
         # Get spacecraft state
         scState = self.scObject.scStateOutMsg.read()
-        r_BN_N = scState.r_BN_N  # Position in inertial frame
+        r_BN_N = scState.r_BN_N  # Position in inertial frame (Moon-centered)
         v_BN_N = scState.v_BN_N  # Velocity in inertial frame
+        
+        # CRITICAL: Position is in Moon-centered inertial frame
+        altitude_above_surface = r_BN_N[2] - SC.MOON_RADIUS
         
         # PRODUCTION OPTIMIZATION: More aggressive early exit
         # Landing legs are at most 3m long, contact impossible above 10m
-        if r_BN_N[2] > 10.0:
+        if altitude_above_surface > 10.0:
             # Write zero forces
             forceMsg = messaging.CmdForceBodyMsgPayload()
             forceMsg.forceRequestInertial = np.zeros(3)
@@ -652,7 +656,7 @@ class AdvancedThrusterController:
             return
         
         # ADDITIONAL OPTIMIZATION: Skip if ascending rapidly and not near ground
-        if r_BN_N[2] > 5.0 and v_BN_N[2] > 1.0:  # Above 5m and ascending > 1 m/s
+        if altitude_above_surface > 5.0 and v_BN_N[2] > 1.0:  # Above 5m and ascending > 1 m/s
             # Write zero forces
             forceMsg = messaging.CmdForceBodyMsgPayload()
             forceMsg.forceRequestInertial = np.zeros(3)
@@ -816,7 +820,9 @@ def run():
     lander.hub.mHub = SC.HUB_MASS
     lander.hub.r_BcB_B = SC.CENTER_OF_MASS_OFFSET
     lander.hub.IHubPntBc_B = SC.INERTIA_TENSOR_FULL
-    lander.hub.r_CN_NInit = np.array([0., 0., 1500.0])   # 1500 m altitude above Moon surface
+    # CRITICAL: Basilisk uses Moon-centered inertial frame
+    # Position = Moon radius (1737.4 km) + terrain height + altitude above terrain
+    lander.hub.r_CN_NInit = np.array([0., 0., SC.MOON_RADIUS + 1500.0])   # 1500 m altitude above Moon surface
     lander.hub.v_CN_NInit = np.array([0., 0., -10.0])    # descending at 10 m/s
     lander.hub.sigma_BNInit = np.array([0., 0., 0.])     # no initial attitude
     lander.hub.omega_BN_BInit = np.zeros(3)              # no rotation

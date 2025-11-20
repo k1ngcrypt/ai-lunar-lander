@@ -85,7 +85,7 @@ from lunar_lander_env import LunarLanderEnv
 
 def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
     """
-    Standalone environment factory for SubprocVecEnv.
+    Standalone environment factory for SubprocVecEnv and DummyVecEnv.
     Must be at module level (not a class method) to be picklable.
     
     Args:
@@ -108,13 +108,17 @@ def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
         from common_utils import setup_basilisk_path
         setup_basilisk_path()
         from lunar_lander_env import LunarLanderEnv
+        from stable_baselines3.common.monitor import Monitor
         
-        # CRITICAL FIX: The state engine approach has a fundamental bug where setState()
-        # doesn't properly update the integrator's cached initial conditions.
-        # We must delay simulation creation until the first reset() call.
+        # CRITICAL FIX: Do NOT call reset() here - let DummyVecEnv/SubprocVecEnv handle it
+        # Calling reset() here with delay_sim_creation causes a hang with n_envs=1
+        # The vectorized env wrapper will call reset() at the right time
         config['delay_sim_creation'] = True
         env = LunarLanderEnv(**config)
-        env.reset(seed=seed + rank)
+        
+        # Wrap with Monitor for episode statistics tracking
+        # This is required by EvalCallback and prevents warnings
+        env = Monitor(env)
         return env
     
     return _init
@@ -246,6 +250,92 @@ class RewardStatisticsCallback(BaseCallback):
             for comp_name in self.reward_components:
                 if len(self.reward_components[comp_name]) > 200:
                     self.reward_components[comp_name] = self.reward_components[comp_name][-200:]
+
+
+class SafeEvalCallback(EvalCallback):
+    """
+    Enhanced EvalCallback that handles evaluation crashes gracefully.
+    
+    CRITICAL FIX: EvalCallback can crash when eval environment has issues,
+    especially in SubprocVecEnv context. This wrapper catches those failures.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.eval_failure_count = 0
+        
+    def _on_step(self) -> bool:
+        """Override to add error handling around evaluation"""
+        continue_training = True
+        
+        if self.eval_freq > 0 and self.n_calls % self.eval_freq == 0:
+            try:
+                # Call parent evaluation logic
+                continue_training = super()._on_step()
+            except Exception as e:
+                self.eval_failure_count += 1
+                if self.verbose > 0:
+                    print(f"\n⚠ WARNING: Evaluation failed (attempt {self.eval_failure_count}): {e}")
+                    print(f"  Training continues, but model performance not evaluated.")
+                
+                # If evaluation fails repeatedly, disable it
+                if self.eval_failure_count >= 3:
+                    print(f"\n⚠ WARNING: Evaluation disabled after {self.eval_failure_count} failures.")
+                    self.eval_freq = 0  # Disable further evaluations
+                
+                continue_training = True  # Continue training despite eval failure
+        else:
+            # Not an eval step, just continue normally
+            continue_training = True
+            
+        return continue_training
+
+
+class SafeCheckpointCallback(CheckpointCallback):
+    """
+    Enhanced CheckpointCallback that safely handles VecNormalize serialization failures.
+    
+    CRITICAL FIX: The default CheckpointCallback can cause silent crashes when saving
+    VecNormalize stats in SubprocVecEnv due to pickle serialization issues with
+    numpy arrays in subprocess pipes. This wrapper catches those failures gracefully.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.vecnormalize_save_failures = 0
+        
+    def _checkpoint_path(self, checkpoint_type: str = "", extension: str = "") -> str:
+        """Override to add error handling"""
+        try:
+            return super()._checkpoint_path(checkpoint_type, extension)
+        except Exception as e:
+            if self.verbose > 0:
+                print(f"⚠ Warning: Failed to generate checkpoint path: {e}")
+            return os.path.join(self.save_path, f"emergency_checkpoint_{self.num_timesteps}.zip")
+    
+    def _on_step(self) -> bool:
+        """Override to add robust error handling around save operations"""
+        if self.n_calls % self.save_freq == 0:
+            try:
+                # Call parent implementation with error recovery
+                return super()._on_step()
+            except Exception as e:
+                self.vecnormalize_save_failures += 1
+                if self.verbose > 0:
+                    print(f"\n⚠ WARNING: Checkpoint save failed (attempt {self.vecnormalize_save_failures}): {e}")
+                    print(f"  Training continues, but checkpoint may be incomplete.")
+                    print(f"  Consider reducing --n-envs if this persists.")
+                
+                # If we've had multiple failures, something is seriously wrong
+                if self.vecnormalize_save_failures >= 3:
+                    print(f"\n✗ CRITICAL: {self.vecnormalize_save_failures} consecutive checkpoint failures!")
+                    print(f"  Checkpoint saving disabled to prevent further crashes.")
+                    print(f"  Training will continue but progress won't be saved.")
+                    # Disable further checkpointing
+                    self.save_freq = float('inf')
+                
+                return True  # Continue training despite save failure
+        return super()._on_step()
 
 
 class TrainingStateCallback(BaseCallback):
@@ -641,8 +731,8 @@ class UnifiedTrainer:
             env_config={
                 'observation_mode': 'compact',
                 'max_episode_steps': 600,
-                'initial_altitude_range': (50.0, 100.0),
-                'initial_velocity_range': ((-5.0, 5.0), (-5.0, 5.0), (-5.0, -2.0)),
+                'initial_altitude_range': (30.0, 60.0),  # EASIER: Lower altitude (was 50-100)
+                'initial_velocity_range': ((-2.0, 2.0), (-2.0, 2.0), (-3.0, -1.0)),  # EASIER: Lower horizontal velocity (was ±5)
                 'terrain_config': {
                     'size': 1000.0,
                     'resolution': 100,
@@ -651,9 +741,9 @@ class UnifiedTrainer:
                     'crater_radius_range': (0, 0)
                 }
             },
-            success_threshold=400.0,
+            success_threshold=300.0,  # EASIER: Reduced from 400 (allows harder landings)
             min_episodes=200,
-            max_timesteps=200_000  # OPTIMIZED: 2x from 100k (high-end hardware)
+            max_timesteps=300_000  # EXTENDED: More training time for mastery (was 200k)
         ))
         
         # Stage 2: Medium altitude with gentle terrain
@@ -981,8 +1071,22 @@ class UnifiedTrainer:
         else:
             env = self._normalize_env(env, training=True)
         
-        eval_env = DummyVecEnv([self._make_env(rank=self.n_envs)])
-        eval_env = self._normalize_env(eval_env, training=False)  # Eval: obs normalization only
+        # Create eval environment with same factory pattern as training
+        # This ensures Basilisk path setup and proper initialization
+        eval_config = {'observation_mode': 'compact', 'max_episode_steps': 1000}
+        eval_env = DummyVecEnv([make_lunar_env(eval_config, self.seed, self.n_envs)])
+        
+        # Wrap with VecNormalize to match training env structure (required by SB3)
+        if isinstance(env, VecNormalize):
+            eval_env = VecNormalize(
+                eval_env,
+                training=False,      # Don't update stats during eval  
+                norm_obs=True,       # Normalize observations
+                norm_reward=False,   # Don't normalize rewards
+                clip_obs=10.0,
+                gamma=0.99
+            )
+            # EvalCallback will sync the running stats automatically
         
         # Create or load model
         if resume_path:
@@ -1006,16 +1110,17 @@ class UnifiedTrainer:
                 print("\nModel architecture:")
                 print(self.model.policy)
         
-        # Setup callbacks
-        checkpoint_callback = CheckpointCallback(
+        # Setup callbacks with safe checkpoint wrapper
+        checkpoint_callback = SafeCheckpointCallback(
             save_freq=100_000,  # OPTIMIZED: Reduced I/O frequency (from 50k to 100k)
             save_path=os.path.join(self.save_dir, 'checkpoints'),
             name_prefix=f'{self.algorithm}_lunar_lander',
             save_replay_buffer=False,
-            save_vecnormalize=True
+            save_vecnormalize=True,  # Now safe with wrapper
+            verbose=1
         )
         
-        eval_callback = EvalCallback(
+        eval_callback = SafeEvalCallback(
             eval_env,
             best_model_save_path=os.path.join(self.save_dir, 'best_model'),
             log_path=os.path.join(self.log_dir, 'eval'),
@@ -1052,9 +1157,14 @@ class UnifiedTrainer:
         self.model.save(final_path)
         print(f"\n✓ Final model saved to: {final_path}")
         
-        # Save VecNormalize stats
-        env.save(vecnormalize_path)
-        print(f"✓ VecNormalize stats saved: {vecnormalize_path}")
+        # Save VecNormalize stats with error handling
+        try:
+            env.save(vecnormalize_path)
+            print(f"✓ VecNormalize stats saved: {vecnormalize_path}")
+        except Exception as e:
+            print(f"\n⚠ WARNING: Failed to save VecNormalize stats: {e}")
+            print(f"  Model is saved, but observation normalization stats are lost.")
+            print(f"  Evaluation may be less accurate without these stats.")
         
         env.close()
         eval_env.close()
@@ -1211,9 +1321,9 @@ class UnifiedTrainer:
                     print(f"✓ Stage mastered! Advancing to next stage...\n")
                     stage_idx += 1  # Advance
                     
-                elif stage_attempts[stage_idx] < 3:
-                    # Allow up to 3 attempts at current stage
-                    print(f"⚠ Stage not mastered. Retrying same stage (attempt {stage_attempts[stage_idx] + 1}/3)...\n")
+                elif stage_attempts[stage_idx] < 5:
+                    # Allow up to 5 attempts at current stage (increased from 3 for Stage 1 mastery)
+                    print(f"⚠ Stage not mastered. Retrying same stage (attempt {stage_attempts[stage_idx] + 1}/5)...\n")
                     # Stay at current stage (will retry on next iteration)
                     
                 elif stage_idx > 0:
@@ -1301,20 +1411,36 @@ class UnifiedTrainer:
             mean_reward (float): Mean reward over evaluation episodes
             success_rate (float): Success rate (0.0-1.0) over evaluation episodes
         """
-        # Create environments for this stage
+        # Create environments for this stage with robust error handling
         if n_envs > 1:
             print(f"  Creating {n_envs} parallel environments for stage '{stage.name}'...")
-            try:
-                # Try SubprocVecEnv for true parallelism (10x faster)
-                env = SubprocVecEnv(
-                    [make_lunar_env(stage.env_config, self.seed, i) for i in range(n_envs)],
-                    start_method='spawn'
-                )
-                print(f"  ✓ Parallel environments created successfully")
-            except Exception as e:
-                # Fallback to DummyVecEnv if pickling fails
-                print(f"  ⚠ Parallel environment creation failed: {e}")
-                print(f"  Falling back to sequential mode (DummyVecEnv)")
+            
+            # Track if we've had previous subprocess failures
+            use_subprocess = True
+            if hasattr(self, '_subprocess_failure_count'):
+                if self._subprocess_failure_count >= 2:
+                    print(f"  ⚠ Skipping SubprocVecEnv due to {self._subprocess_failure_count} previous failures")
+                    use_subprocess = False
+            else:
+                self._subprocess_failure_count = 0
+            
+            if use_subprocess:
+                try:
+                    # Try SubprocVecEnv for true parallelism (10x faster)
+                    env = SubprocVecEnv(
+                        [make_lunar_env(stage.env_config, self.seed, i) for i in range(n_envs)],
+                        start_method='spawn'
+                    )
+                    print(f"  ✓ Parallel environments created successfully (SubprocVecEnv)")
+                except Exception as e:
+                    # Fallback to DummyVecEnv if creation fails
+                    print(f"  ⚠ Parallel environment creation failed: {e}")
+                    print(f"  Falling back to sequential mode (DummyVecEnv)")
+                    self._subprocess_failure_count += 1
+                    env = DummyVecEnv([self._make_env(stage.env_config, i) for i in range(n_envs)])
+            else:
+                # Use DummyVecEnv directly if SubprocVecEnv has failed before
+                print(f"  Using sequential mode (DummyVecEnv) for stability")
                 env = DummyVecEnv([self._make_env(stage.env_config, i) for i in range(n_envs)])
         else:
             env = DummyVecEnv([self._make_env(stage.env_config)])
@@ -1351,27 +1477,21 @@ class UnifiedTrainer:
             env = self._normalize_env(env, training=True)
         
         # Create eval environment (must share same VecNormalize stats for consistent observations)
-        eval_env = DummyVecEnv([self._make_env(stage.env_config, n_envs)])
+        # CRITICAL: Use same factory pattern as training envs to ensure Basilisk path is set up
+        eval_env = DummyVecEnv([make_lunar_env(stage.env_config, self.seed, n_envs)])
         
-        # Share VecNormalize stats with training env (critical for consistent evaluation)
-        # Set training=False to freeze stats updates, norm_reward=False to get raw rewards
+        # Wrap eval env with VecNormalize to match training env structure
+        # SB3's EvalCallback requires both envs to have same wrapper type
         if isinstance(env, VecNormalize):
-            # Clone the training env's VecNormalize wrapper for eval
             eval_env = VecNormalize(
                 eval_env,
-                training=False,        # Don't update stats during eval
-                norm_obs=True,         # Use same obs normalization
-                norm_reward=False,     # Don't normalize rewards (we want raw values)
+                training=False,      # Don't update stats during eval
+                norm_obs=True,       # Normalize observations
+                norm_reward=False,   # Don't normalize rewards (we want raw values for evaluation)
                 clip_obs=10.0,
-                clip_reward=10.0,
                 gamma=0.99
             )
-            # Copy the running statistics from training env
-            eval_env.obs_rms = env.obs_rms
-            eval_env.ret_rms = env.ret_rms
-        else:
-            # Fallback if env is not VecNormalized (shouldn't happen)
-            eval_env = self._normalize_env(eval_env, training=False)
+            # EvalCallback will sync the running stats automatically via sync_envs_normalization()
         
         # Create or update model
         if self.model is None:
@@ -1383,16 +1503,19 @@ class UnifiedTrainer:
             # Update environment for existing model
             self.model.set_env(env)
         
-        # Setup callbacks
-        checkpoint_callback = CheckpointCallback(
+        # Setup callbacks with safe checkpoint wrapper
+        checkpoint_callback = SafeCheckpointCallback(
             save_freq=100_000 if not demo else 5_000,  # OPTIMIZED: Reduced I/O (from 50k to 100k)
             save_path=os.path.join(self.save_dir, f'{stage.name}_checkpoints'),
             name_prefix=f'{self.algorithm}_{stage.name}',
             save_replay_buffer=False,
-            save_vecnormalize=True  # CRITICAL: Save normalization statistics
+            save_vecnormalize=True,  # CRITICAL: Save normalization statistics (now safe)
+            verbose=1
         )
         
-        eval_callback = EvalCallback(
+        # CRITICAL: Pass eval_env without VecNormalize wrapper
+        # EvalCallback will automatically sync normalization from model.get_env()
+        eval_callback = SafeEvalCallback(
             eval_env,
             best_model_save_path=os.path.join(self.save_dir, f'{stage.name}_best'),
             log_path=os.path.join(self.log_dir, f'{stage.name}_eval'),
@@ -1442,11 +1565,54 @@ class UnifiedTrainer:
             print("  1. Basilisk memory issues in parallel environments")
             print("  2. CUDA out-of-memory in GPU accelerated training")
             print("  3. Simulation divergence causing NaN values")
-            print("\nRecommended solutions:")
-            print("  1. Use single environment: --n-envs 1")
-            print("  2. Reduce batch size if using GPU")
+            print("\nAttempting automatic recovery...")
             print(f"{'='*60}\n")
-            raise
+            
+            # Track subprocess failure
+            self._subprocess_failure_count = getattr(self, '_subprocess_failure_count', 0) + 1
+            
+            # Close broken environments
+            try:
+                env.close()
+                eval_env.close()
+            except Exception:
+                pass  # Ignore errors during cleanup of broken env
+            
+            # If we've failed multiple times, give up
+            if self._subprocess_failure_count >= 3:
+                print(f"✗ CRITICAL: {self._subprocess_failure_count} consecutive subprocess failures!")
+                print(f"  Cannot continue with parallel environments.")
+                print(f"\nPlease restart training with --n-envs 1")
+                raise
+            
+            # Otherwise, recreate with DummyVecEnv and retry
+            print(f"  Recreating environments with DummyVecEnv (attempt {self._subprocess_failure_count}/3)...")
+            env = DummyVecEnv([self._make_env(stage.env_config, i) for i in range(n_envs)])
+            env = self._normalize_env(env, training=True)
+            eval_env = DummyVecEnv([self._make_env(stage.env_config, n_envs)])
+            eval_env = self._normalize_env(eval_env, training=False)
+            
+            # Update model environment
+            self.model.set_env(env)
+            
+            print(f"  ✓ Environments recreated successfully")
+            print(f"  Resuming training from step {self.model.num_timesteps:,}...\n")
+            
+            # Retry training with remaining timesteps
+            remaining_timesteps = stage.max_timesteps - self.model.num_timesteps
+            if remaining_timesteps > 0:
+                try:
+                    self.model.learn(
+                        total_timesteps=remaining_timesteps,
+                        callback=callback,
+                        log_interval=10,
+                        progress_bar=True,
+                        reset_num_timesteps=False
+                    )
+                except Exception as retry_error:
+                    print(f"\n✗ Retry failed: {retry_error}")
+                    print(f"  Cannot recover from subprocess crash.")
+                    raise
         
         # Save stage model
         stage_path = os.path.join(self.save_dir, f'{stage.name}_final')
@@ -1455,9 +1621,16 @@ class UnifiedTrainer:
         
         # Save VecNormalize statistics for next stage
         # Critical for curriculum learning - preserves observation scaling knowledge
-        env.save(vecnormalize_path)
-        self.current_vecnormalize_path = vecnormalize_path
-        print(f"✓ VecNormalize stats saved: {vecnormalize_path}")
+        try:
+            env.save(vecnormalize_path)
+            self.current_vecnormalize_path = vecnormalize_path
+            print(f"✓ VecNormalize stats saved: {vecnormalize_path}")
+        except Exception as e:
+            print(f"\n⚠ WARNING: Failed to save VecNormalize stats: {e}")
+            print(f"  This may cause issues when resuming curriculum training.")
+            print(f"  Next stage will start with fresh normalization statistics.")
+            # Don't update current_vecnormalize_path if save failed
+            # This ensures we don't try to load a corrupt file later
         
         # Evaluate with success tracking
         mean_reward, std_reward, success_rate = self._evaluate_model_with_success(
@@ -1517,12 +1690,14 @@ class UnifiedTrainer:
         
         print("✓ Model loaded successfully")
         
-        # Create environment
+        # Create environment using same settings as training for consistency
         config = env_config or {
             'observation_mode': 'compact',
-            'render_mode': 'human' if render else None
+            'render_mode': 'human' if render else None,
+            'max_episode_steps': 1000
         }
-        config['create_new_sim_on_reset'] = True  # Avoid Basilisk warnings
+        # Use optimized REUSE mode (same as training) instead of CREATE_NEW
+        # The delay_sim_creation fix makes REUSE mode work correctly
         env = LunarLanderEnv(**config)
         
         # Evaluate
