@@ -18,8 +18,8 @@ This is a reinforcement learning project for training AI agents to perform auton
 
 2. **Environment Layer** (`lunar_lander_env.py`): Gymnasium wrapper
    - Translates Basilisk simulation into Gym API (`reset()`, `step()`, render)
-   - **Observation space**: 32D compact (position, velocity, Euler angles, IMU, fuel flow rate, time-to-impact, LIDAR azimuthal bins) or 200+ full
-   - **Action space**: 4D compact (main throttle 0.4-1.0, pitch/yaw/roll torques ±1) or 9D full
+   - **Observation space**: 32D compact (position, velocity, Euler angles, IMU, fuel flow rate, time-to-impact, LIDAR azimuthal bins)
+   - **Action space**: 15D (primary throttles×3, gimbals×6, mid-body groups×3, RCS groups×3)
    - **Action smoothing**: Exponential moving average (80% old, 20% new) for stable control
    - **Reward shaping**: Comprehensive multi-component architecture:
      - Terminal rewards (±1000): Dominant signals for episode outcomes
@@ -33,8 +33,8 @@ This is a reinforcement learning project for training AI agents to perform auton
    - **Advancement criteria**: Mean reward > threshold AND success rate > 60% (stage regression if repeated failures)
    - **Observation normalization**: `VecNormalize` wrapper for zero-mean, unit-variance inputs (critical for PPO/SAC/TD3)
    - Multi-algorithm support (PPO default, SAC for sample efficiency, TD3 for deterministic control)
-   - Parallel environments (`SubprocVecEnv` with `--n-envs 4-16`)
-   - Checkpointing every 50k steps, best model auto-save via `EvalCallback`
+   - Parallel environments (`SubprocVecEnv` with `--n-envs 4-16`, default 12)
+   - Checkpointing every 100k steps, best model auto-save via `EvalCallback` every 10k steps
 
 ### Key Integration Points
 - **Basilisk ↔ Gymnasium**: `LunarLanderEnv._create_simulation()` initializes Basilisk sim, updates via `scSim.ExecuteSimulation()` at 0.1s timestep
@@ -47,7 +47,14 @@ This is a reinforcement learning project for training AI agents to perform auton
 
 ### Setup & Dependencies
 ```powershell
-# Basilisk is pre-built in ./basilisk/dist3/ (no rebuild needed)
+# Basilisk must be installed separately (NOT included in repository)
+# Option 1: Install from PyPI (recommended)
+pip install Basilisk
+
+# Option 2: Build from source
+# See: https://hanspeterschaub.info/basilisk/
+# Ensure built dist3 directory is in your Python path
+
 # Install Python dependencies
 pip install stable-baselines3[extra] gymnasium numpy matplotlib tensorboard
 ```
@@ -122,14 +129,14 @@ Each `CurriculumStage` requires:
 - `env_config`: Dict passed to `LunarLanderEnv.__init__()` (NOT arbitrary parameters)
 - `success_threshold`: Mean reward over `min_episodes` to advance (POSITIVE values target successful landings)
 - `min_episodes`: Minimum episodes before checking advancement (200-400 for proper mastery)
-- `max_timesteps`: Hard cap per stage (100k-400k to prevent overfitting)
+- `max_timesteps`: Hard cap per stage (300k-800k to prevent overfitting)
 
 **Advancement logic**: Requires BOTH mean reward > threshold AND success rate > 60%. Supports stage regression (go back one stage) if repeated failures.
 
-**Convention**: Stages progressively increase `initial_altitude_range` (50m → 2000m), `num_craters` (0 → 25), reduce velocity tolerance
+**Convention**: Stages progressively increase `initial_altitude_range` (30m → 22000m), `num_craters` (0 → 25), reduce velocity tolerance
 
 ### Basilisk Integration Quirks
-1. **Path setup required**: All scripts must add `basilisk/dist3` to `sys.path` before importing (use `setup_basilisk_path()` from `common_utils`)
+1. **Path setup required**: All scripts must import Basilisk as a Python module (install via `pip install Basilisk` or build from source)
 2. **Time units**: Basilisk uses nanoseconds (`macros.sec2nano(0.1)` for 0.1s timestep)
 3. **Coordinate frames**: 
    - `_N`: Moon-centered inertial frame (North-East-Down)
@@ -138,22 +145,24 @@ Each `CurriculumStage` requires:
 4. **Fuel depletion**: `FuelTank` effectors auto-update spacecraft mass/inertia - DO NOT manually modify `lander.hub.mHub`
 5. **Reset optimization**: Use state engine (`stateEngine.setState()`) to update states directly - avoids re-initialization warnings and is 100x faster
 
-### Action Space Mapping (Compact Mode)
+### Action Space Mapping
 **Located in**: `lunar_lander_env.py::step()`
 ```python
-# action = [main_throttle, pitch_torque, yaw_torque, roll_torque]
+# action = [primary_throttles (3), primary_gimbals (6), midbody_groups (3), rcs_groups (3)]
+# Total: 15D action space
+# - Primary throttles: [0.4-1.0] for 3 Raptor engines
+# - Gimbals: [-8°, +8°] pitch/yaw per engine (6 total)
+# - Mid-body groups: [0, 1] for rotation control (3)
+# - RCS groups: [0, 1] for pitch/yaw/roll (3)
 # Action smoothing applied: 80% old action + 20% new action (exponential moving average)
-primary_throttles = [main_throttle] * 3  # Apply to all 3 engines equally
-# Torques converted to RCS throttles via least-squares allocation (proper moment arm calculations)
 ```
-**Why compact**: 4D action space trains 10x faster than 9D full mode; sufficient for landing task
-**Action smoothing**: Reduces control oscillations, improves stability (configurable via `action_smooth_alpha`)
+**Why comprehensive**: 15D action space provides full pilot-level control authority; action smoothing improves stability (configurable via `action_smooth_alpha`)
 
 ### File Output Structure (Auto-generated)
 ```
 models/
-├── best_model/           # Best model via EvalCallback (auto-saved)
-├── checkpoints/          # Every 50k steps (ppo_lunar_lander_NNNNNN_steps.zip)
+├── best_model/           # Best model via EvalCallback (auto-saved every 10k eval steps)
+├── checkpoints/          # Every 100k steps (ppo_lunar_lander_NNNNNN_steps.zip)
 ├── curriculum_final.zip  # Final curriculum model
 └── stage*_final.zip      # Per-stage completions
 
@@ -164,12 +173,14 @@ logs/
 ## Common Pitfalls & Solutions
 
 ### "Module not found: Basilisk"
-**Cause**: Missing `sys.path` setup
-**Fix**: Ensure all scripts include:
+**Cause**: Basilisk not installed
+**Fix**: Install Basilisk:
 ```python
-import os, sys
-basiliskPath = os.path.join(os.path.dirname(__file__), 'basilisk', 'dist3')
-sys.path.insert(0, basiliskPath)
+# Option 1: Install from PyPI
+pip install Basilisk
+
+# Option 2: Build from source
+# See: https://hanspeterschaub.info/basilisk/
 ```
 
 ### Agent Not Learning (Reward < -200)
@@ -177,7 +188,7 @@ sys.path.insert(0, basiliskPath)
 2. **Verify environment termination**: Ensure episodes end (check `max_episode_steps` in `LunarLanderEnv`)
 3. **Inspect TensorBoard**: Look for `rollout/ep_rew_mean` trend over 100k+ steps AND `episode/success_rate_100`
 4. **Verify observation normalization**: Ensure `VecNormalize` is applied (check `unified_training.py::_normalize_env()`)
-5. **Reduce action space**: Use `action_mode='compact'` (4D) not `'full'` (9D)
+5. **Increase training time**: Try longer per-stage training or more episodes
 6. **Check success rate**: If reward positive but success rate low, stage may need more training time
 
 ### Training Crashes on Step

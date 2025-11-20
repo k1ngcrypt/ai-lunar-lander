@@ -12,7 +12,7 @@ Train AI agents to perform precise Moon landings using Basilisk astrodynamics si
 # 1. Test your setup (2 minutes)
 python unified_training.py --mode test
 
-# 2. Train with curriculum learning (4-8 hours) - Recommended
+# 2. Train with curriculum learning (2-4 hours with GPU) - Recommended
 python unified_training.py --mode curriculum
 
 # 3. Monitor training
@@ -38,12 +38,24 @@ This project trains AI agents to autonomously land spacecraft on the Moon, handl
 
 ## 📋 Prerequisites
 
+### Python Dependencies
 ```bash
-# Python 3.8+
-pip install stable-baselines3[extra] gymnasium numpy matplotlib
-
-# Basilisk is included in ./basilisk/ directory
+# Python 3.8+ required
+pip install stable-baselines3[extra] gymnasium numpy matplotlib tensorboard
 ```
+
+### Basilisk Astrodynamics Framework
+**Important**: Basilisk is **not included** in this repository and must be installed separately:
+
+```bash
+# Option 1: Install from PyPI (recommended)
+pip install Basilisk
+
+# Option 2: Build from source
+# See: https://hanspeterschaub.info/basilisk/
+```
+
+**Note**: The code expects Basilisk to be importable as a Python module. If you build from source, ensure the built `dist3` directory is in your Python path.
 
 ---
 
@@ -53,8 +65,8 @@ pip install stable-baselines3[extra] gymnasium numpy matplotlib
 |------|----------|---------|
 | `test` | 2 min | Verify environment setup |
 | `demo` | 15 min | Quick demonstration of curriculum learning |
-| `standard` | 1-2 hrs | Direct RL training without curriculum |
-| `curriculum` | 4-8 hrs | **Progressive difficulty training (best results)** |
+| `standard` | 1-2 hrs | Direct RL training without curriculum (2M timesteps default) |
+| `curriculum` | 2-4 hrs | **Progressive difficulty training with GPU (best results)** |
 | `eval` | 1-2 min | Evaluate trained models |
 
 ### Curriculum Stages
@@ -132,8 +144,8 @@ python unified_training.py --mode demo
 # Full curriculum training (recommended)
 python unified_training.py --mode curriculum --n-envs 4
 
-# Standard training (no curriculum)
-python unified_training.py --mode standard --timesteps 1000000
+# Standard training (no curriculum) - default 2M timesteps
+python unified_training.py --mode standard --timesteps 2000000
 
 # Resume training from checkpoint
 python unified_training.py --mode standard --resume ./models/checkpoints/ppo_lunar_lander_500000_steps --timesteps 500000
@@ -155,9 +167,9 @@ python unified_training.py --mode eval --model-path ./models/best_model/best_mod
 The training system includes comprehensive save/resume functionality:
 
 ### Automatic Checkpointing
-- **Every 50,000 timesteps**: Model + VecNormalize stats saved
+- **Every 100,000 timesteps**: Model + VecNormalize stats saved
 - **Curriculum state**: Stage progress, attempts, and performance tracked
-- **Best model**: Automatically saved based on evaluation performance
+- **Best model**: Automatically saved based on evaluation performance (every 10,000 timesteps)
 
 ### Resume Training
 ```bash
@@ -175,8 +187,9 @@ python unified_training.py --mode curriculum --resume-curriculum
 models/
 ├── training_state.json           # Training progress (human-readable)
 ├── curriculum_state.pkl          # Complete state (binary)
-├── checkpoints/                  # Regular checkpoints
-│   ├── ppo_lunar_lander_50000_steps.zip
+├── checkpoints/                  # Regular checkpoints (every 100k steps)
+│   ├── ppo_lunar_lander_100000_steps.zip
+│   ├── ppo_lunar_lander_200000_steps.zip
 │   └── vecnormalize.pkl          # Normalization statistics
 ├── stage*_checkpoints/           # Per-stage checkpoints (curriculum)
 ├── stage*_vecnormalize.pkl       # Per-stage normalization
@@ -435,7 +448,11 @@ pip install --upgrade stable-baselines3[extra] gymnasium
 - **Framework**: Stable Baselines3 (PyTorch-based)
 - **Observation**: 32-dimensional state vector (position, velocity, Euler angles, fuel flow rate, time-to-impact, LIDAR azimuthal bins, IMU)
 - **Observation normalization**: VecNormalize for zero-mean, unit-variance observations (improves stability)
-- **Action**: 4-dimensional continuous (main throttle + pitch/yaw/roll torque commands)
+- **Action**: 15-dimensional continuous control:
+  - Primary engine throttles (3): individual throttle [0.4-1.0]
+  - Primary engine gimbals (6): pitch/yaw per engine [-8°, +8°]
+  - Mid-body thruster groups (3): rotation control [0, 1]
+  - RCS thruster groups (3): pitch/yaw/roll [0, 1]
 - **Action smoothing**: Exponential moving average filter (80% old, 20% new) for stable control
 - **Reward**: Comprehensive multi-component system with:
   - Terminal rewards (±1000): Dominant signals for success/failure
