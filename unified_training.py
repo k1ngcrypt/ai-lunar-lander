@@ -1670,8 +1670,15 @@ class UnifiedTrainer:
             n_episodes: Number of evaluation episodes
             render: Whether to render during evaluation
             env_config: Environment configuration dict
-            export_vizard: If True, export Vizard .bin files for each episode
-            vizard_output_dir: Directory to save .bin files
+            export_vizard: If True, export ONE successful landing to Vizard .bin file
+            vizard_output_dir: Directory to save .bin file
+            
+        Vizard Export Behavior:
+            - Runs episodes until finding the first SUCCESSFUL landing (reward > 600)
+            - Exports ONLY that successful episode as 'landing.bin'
+            - Skips exporting failed attempts and subsequent successful landings
+            - If no successful landing in n_episodes, warns user
+            - This provides one clean, high-quality reference recording
         """
         print("\n" + "="*80)
         print("MODEL EVALUATION MODE")
@@ -1729,11 +1736,16 @@ class UnifiedTrainer:
         episode_rewards = []
         episode_lengths = []
         successes = []
+        vizard_exported = False  # Track if we've exported one full landing
         
         for ep in range(n_episodes):
+            # Only export Vizard for ONE successful episode
+            # This saves disk space and provides a clean reference recording
+            export_this_episode = export_vizard and not vizard_exported
+            
             # Set episode-specific Vizard output file
-            if export_vizard:
-                episode_bin_path = os.path.join(vizard_output_dir, f'episode_{ep+1:03d}.bin')
+            if export_this_episode:
+                episode_bin_path = os.path.join(vizard_output_dir, f'landing.bin')
                 env.set_vizard_output(episode_bin_path)
                 print(f"\n[Episode {ep+1}] Recording to: {episode_bin_path}")
             
@@ -1755,8 +1767,8 @@ class UnifiedTrainer:
             episode_rewards.append(episode_reward)
             episode_lengths.append(step_count)
             
-            # Check success (positive reward usually means successful landing)
-            success = episode_reward > 100
+            # Check success (reward > 600 indicates successful landing)
+            success = episode_reward > 600
             successes.append(success)
             
             status = "✓ SUCCESS" if success else "✗ FAILED"
@@ -1765,12 +1777,18 @@ class UnifiedTrainer:
             print(f"  Length: {step_count} steps")
             print(f"  Final altitude: {info.get('altitude', 0):.2f} m")
             print(f"  Fuel remaining: {info.get('fuel_fraction', 0)*100:.1f}%")
-            if export_vizard:
-                if os.path.exists(episode_bin_path):
-                    file_size = os.path.getsize(episode_bin_path) / (1024 * 1024)  # MB
-                    print(f"  Vizard file: {os.path.basename(episode_bin_path)} ({file_size:.2f} MB)")
+            
+            # If we exported this episode and it was successful, mark as done
+            if export_this_episode:
+                if success:
+                    if os.path.exists(episode_bin_path):
+                        file_size = os.path.getsize(episode_bin_path) / (1024 * 1024)  # MB
+                        print(f"  ✓ Vizard export: {os.path.basename(episode_bin_path)} ({file_size:.2f} MB)")
+                        vizard_exported = True  # Don't export any more episodes
+                    else:
+                        print(f"  ⚠ Warning: Vizard file not created")
                 else:
-                    print(f"  ⚠ Warning: Vizard file not created")
+                    print(f"  ✗ Landing failed - will try next episode")
             print()
         
         # Summary statistics
@@ -1790,14 +1808,19 @@ class UnifiedTrainer:
         print(f"Max reward: {max(episode_rewards):.2f}")
         
         if export_vizard:
-            print(f"\n✓ Vizard files exported: {n_episodes}")
-            print(f"  Location: {vizard_output_dir}")
-            print(f"\nTo view in Vizard:")
-            print(f"  1. Start Vizard application")
-            print(f"  2. Select File → Open")
-            print(f"  3. Navigate to: {os.path.abspath(vizard_output_dir)}")
-            print(f"  4. Open any episode_XXX.bin file")
-            print(f"  5. Click 'Start Visualization'")
+            if vizard_exported:
+                print(f"\n✓ Vizard file exported: 1 successful landing")
+                print(f"  Location: {os.path.join(vizard_output_dir, 'landing.bin')}")
+                print(f"\nTo view in Vizard:")
+                print(f"  1. Start Vizard application")
+                print(f"  2. Select File → Open")
+                print(f"  3. Navigate to: {os.path.abspath(vizard_output_dir)}")
+                print(f"  4. Open landing.bin")
+                print(f"  5. Click 'Start Visualization'")
+            else:
+                print(f"\n⚠ Warning: No successful landing to export")
+                print(f"  Ran {n_episodes} episodes but none succeeded")
+                print(f"  Try increasing --eval-episodes or training the model more")
         
         print("="*80 + "\n")
         

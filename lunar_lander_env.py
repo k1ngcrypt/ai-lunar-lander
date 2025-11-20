@@ -742,6 +742,7 @@ class LunarLanderEnv(gym.Env):
             
             # Use vizSupport to enable visualization WITH saveFile parameter
             # CRITICAL: scList must be a LIST of spacecraft objects, not a single object
+            # Start with MINIMAL configuration to ensure recording works
             self.viz_interface = vizSupport.enableUnityVisualization(
                 self.scSim,
                 task_name,
@@ -749,18 +750,93 @@ class LunarLanderEnv(gym.Env):
                 saveFile=save_file
             )
             
-            # Configure visualization settings
+            # Configure comprehensive visualization settings
             viz = self.viz_interface
-            if hasattr(viz, 'settings'):
-                viz.settings.ambient = 0.6
-                viz.settings.orbitLinesOn = 1
-                viz.settings.spacecraftCSon = 1
-                viz.settings.planetCSon = 1
-                viz.settings.skyBox = "black"
-                viz.settings.showSpacecraftLabels = 1
+            
+            # ===== General Settings =====
+            viz.settings.ambient = 0.3  # Low ambient for dramatic lighting
+            viz.settings.sunIntensity = 1.5  # Bright sun (no atmosphere on Moon)
+            viz.settings.attenuateSunLightWithDistance = 1  # Realistic lighting
+            viz.settings.spacecraftShadowBrightness = 0.15  # Dark shadows on Moon
+            
+            # ===== Label Settings =====
+            viz.settings.showSpacecraftLabels = 1
+            viz.settings.showCSLabels = 1  # Show coordinate system labels
+            viz.settings.showThrusterLabels = -1  # Hide thruster labels (too many)
+            viz.settings.showCelestialBodyLabels = 1
+            
+            # ===== Coordinate Frame Settings =====
+            viz.settings.spacecraftCSon = 1  # Show spacecraft body frame
+            viz.settings.planetCSon = 1  # Show Moon-centered frame
+            viz.settings.showHillFrame = -1  # Hide Hill frame (not relevant for landing)
+            viz.settings.showVelocityFrame = 1  # Show velocity frame (useful for landing)
+            
+            # ===== Orbit Line Settings =====
+            viz.settings.orbitLinesOn = -1  # Disable osculating orbit (landing, not orbit)
+            viz.settings.trueTrajectoryLinesOn = 1  # Show true path (relative to Moon)
+            viz.settings.truePathRelativeBody = "moon"  # Plot trajectory relative to Moon
+            
+            # ===== View Settings =====
+            viz.settings.skyBox = "black"  # Black space (Moon has no atmosphere)
+            viz.settings.atmospheresOff = 1  # Disable atmosphere effect
+            viz.settings.forceStartAtSpacecraftLocalView = 1  # Start in spacecraft view
+            viz.settings.spacecraftSizeMultiplier = 2.0  # Make spacecraft visible from distance
+            viz.settings.scViewToPlanetViewBoundaryMultiplier = 5  # 5km boundary for view transition
+            
+            # ===== Actuator GUI Settings =====
+            vizSupport.setActuatorGuiSetting(viz,
+                viewThrusterPanel=1,  # Show thruster panel
+                viewThrusterHUD=1,  # Show thruster plumes
+                showThrusterLabels=-1  # Hide individual thruster labels
+            )
+            
+            # ===== Camera Settings =====
+            # Create chase camera view (looking at lander from behind/above)
+            vizSupport.createStandardCamera(viz,
+                setMode=1,  # Pointing vector mode
+                fieldOfView=60.0 * macros.D2R,  # 60° FOV
+                pointingVector_B=[0.0, 0.0, -1.0],  # Look down (opposite of +Z nose)
+                position_B=[5.0, 0.0, 10.0],  # Behind and above
+                displayName="Chase Camera"
+            )
+            
+            # Create nadir camera (looking straight down at landing site)
+            vizSupport.createStandardCamera(viz,
+                setMode=1,  # Pointing vector mode
+                fieldOfView=90.0 * macros.D2R,  # Wide FOV for terrain
+                pointingVector_B=[0.0, 0.0, -1.0],  # Look down
+                position_B=[0.0, 0.0, 2.0],  # Near nose, looking down
+                displayName="Nadir Camera"
+            )
+            
+            # ===== Spacecraft Model =====
+            # Use custom cylinder model to represent Starship HLS (tall cylinder)
+            vizSupport.createCustomModel(viz,
+                modelPath="CYLINDER",  # Primitive cylinder shape
+                scale=[4.0, 4.0, 25.0],  # 8m diameter, 50m height (Starship-like)
+                offset=[0.0, 0.0, 0.0],  # Origin at mid-height
+                rotation=[0.0, 0.0, 0.0],  # No rotation
+                color=vizSupport.toRGBA255("silver", alpha=1.0)
+            )
+            
+            # ===== Pointing Lines =====
+            # Add line pointing to Moon center (helpful for orientation)
+            vizSupport.createPointLine(viz,
+                toBodyName='moon',
+                lineColor=vizSupport.toRGBA255("green", alpha=0.7)
+            )
+            
+            # ===== Live Settings (can change during simulation) =====
+            viz.liveSettings.relativeOrbitChief = self.lander.ModelTag
             
             print(f"[Vizard] Recording enabled: {save_file}")
-            print(f"[Vizard] Visualization interface configured")
+            print(f"[Vizard] Comprehensive visualization configured:")
+            print(f"  - Thruster visualization: 3 effector clusters with color coding")
+            print(f"  - Custom Starship HLS cylinder model (8m x 50m)")
+            print(f"  - 2 camera views: Chase Camera, Nadir Camera")
+            print(f"  - Realistic lunar lighting (low ambient, bright sun)")
+            print(f"  - True trajectory plotted relative to Moon surface")
+            print(f"  - Coordinate frames: Body frame, Velocity frame visible")
             
         except ImportError as e:
             print(f"[Vizard] Warning: vizSupport not available: {e}")
@@ -1588,9 +1664,9 @@ class LunarLanderEnv(gym.Env):
         # Finalize Vizard recording if active
         if self.enable_vizard and self.viz_interface is not None:
             try:
-                # Force flush of protobuf buffer by calling any cleanup methods
-                if hasattr(self.viz_interface, 'Reset'):
-                    self.viz_interface.Reset(0)  # Reset with finalization
+                # DO NOT call Reset() - it truncates the file!
+                # Just let the viz interface finalize naturally
+                # The protobuf data is flushed automatically when the simulation ends
                 print(f"[Vizard] Recording finalized")
             except Exception as e:
                 print(f"[Vizard] Warning during cleanup: {e}")

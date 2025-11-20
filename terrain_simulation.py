@@ -126,7 +126,7 @@ class LunarRegolithModel:
             
             # Verify shape
             if self.heightmap.shape != (self.resolution, self.resolution):
-                print(f"⚠ Heightmap shape mismatch: expected ({self.resolution}, {self.resolution}), got {self.heightmap.shape}")
+                print(f"[WARNING] Heightmap shape mismatch: expected ({self.resolution}, {self.resolution}), got {self.heightmap.shape}")
                 # Resize if needed
                 print(f"  Using simple nearest-neighbor resize...")
                 from numpy import linspace
