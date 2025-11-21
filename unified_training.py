@@ -2,34 +2,33 @@
 unified_training.py
 Unified RL Training System for Lunar Landing
 
-This comprehensive training script combines the best features from multiple
-training approaches:
+Comprehensive training script combining:
 - Standard RL training (PPO, SAC, TD3)
 - Curriculum learning with progressive difficulty (5 stages)
 - Automated testing and validation
-- Advanced callbacks and monitoring (success rate tracking)
+- Advanced callbacks and monitoring
 - Multi-environment parallelization
-- Observation normalization (VecNormalize)
-- Comprehensive evaluation and visualization
+- Observation normalization
+- Evaluation and visualization
 
 Key Features:
-✓ Multiple RL algorithms (PPO, SAC, TD3)
-✓ Curriculum learning with stage regression support
-✓ Observation normalization for training stability
+✓ Multiple RL algorithms
+✓ Curriculum learning with stage regression
+✓ Observation normalization
 ✓ Parallel environment training
-✓ Automatic checkpointing and model saving
-✓ TensorBoard logging with success rate metrics
-✓ Environment validation and testing
-✓ Model evaluation and rendering
-✓ Quick demo mode for testing
-✓ Resumable training from checkpoints
+✓ Automatic checkpointing
+✓ TensorBoard logging
+✓ Environment validation
+✓ Model evaluation
+✓ Quick demo mode
+✓ Resumable training
 
 Curriculum Improvements:
-- Stage 1 teaches LANDING (not just hovering)
-- Advancement requires BOTH mean reward AND 60% success rate
-- Stage regression enabled for repeated failures
+- Stage 1 teaches LANDING (not hovering)
+- Advancement requires mean reward AND 60% success rate
+- Stage regression for repeated failures
 - Reduced max_timesteps (100k-400k) to prevent overfitting
-- Increased min_episodes (200-400) for mastery verification
+- Increased min_episodes (200-400) for mastery
 
 Usage Examples:
     # Quick test (2 minutes)
@@ -41,7 +40,7 @@ Usage Examples:
     # Standard training (1M steps)
     python unified_training.py --mode standard --timesteps 1000000
     
-    # Full curriculum training (recommended)
+    # Full curriculum training
     python unified_training.py --mode curriculum
     
     # Evaluate trained model
@@ -63,7 +62,6 @@ from datetime import datetime
 import multiprocessing
 import warnings
 
-# Stable Baselines3 imports
 from stable_baselines3 import PPO, SAC, TD3
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.callbacks import (
@@ -75,18 +73,14 @@ from stable_baselines3.common.env_checker import check_env
 import gymnasium as gym
 import torch
 
-# Custom environment
 from lunar_lander_env import LunarLanderEnv
 
 
-# ============================================================================
-# STANDALONE ENVIRONMENT FACTORY (for multiprocessing)
-# ============================================================================
-
+# Standalone environment factory for SubprocVecEnv/DummyVecEnv
+# Must be at module level to be picklable
 def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
     """
-    Standalone environment factory for SubprocVecEnv and DummyVecEnv.
-    Must be at module level (not a class method) to be picklable.
+    Standalone environment factory.
     
     Args:
         env_config: Environment configuration dict
@@ -96,7 +90,6 @@ def make_lunar_env(env_config: Dict = None, seed: int = 42, rank: int = 0):
     Returns:
         Callable that creates a LunarLanderEnv
     """
-    # Deep copy config to avoid shared mutable state
     import copy
     config = copy.deepcopy(env_config) if env_config else {
         'observation_mode': 'compact',

@@ -1,22 +1,22 @@
 """
 ScenarioLunarLanderStarter.py
-Basilisk lunar lander scenario for Starship HLS (Human Landing System)
+Basilisk lunar lander scenario for Starship HLS
 
-This module provides classes and functions for high-fidelity Basilisk simulation
+Classes and functions for high-fidelity Basilisk simulation
 used for RL training. Can be imported as a module or run standalone.
 
 KEY FEATURES:
-- Realistic Starship HLS configuration (1.3M kg initial mass, 3 Raptor engines)
-- Advanced sensor suite (IMU with noise, LIDAR with 64 rays, fuel gauges)
-- Lunar regolith terrain model (Bekker-Wong mechanics, procedural craters)
+- Realistic Starship HLS configuration (1.3M kg, 3 Raptor engines)
+- Advanced sensor suite (IMU, LIDAR with 64 rays, fuel gauges)
+- Lunar regolith terrain model (Bekker-Wong mechanics)
 - Automatic fuel depletion via thrusterStateEffector
-- Terrain contact forces via analytical model
-- Python-based thruster controller (AdvancedThrusterController)
+- Terrain contact forces
+- Python-based thruster controller
 
 SENSORS:
-- High-precision IMU (gyro noise: 0.00001 rad/s, accel noise: 0.001 m/s²)
-- LIDAR: 64-ray cone scan (45° cone, 150m range, realistic noise/dropout)
-- AISensorSuite: Comprehensive observation space (200+ dimensions)
+- IMU: gyro noise 0.00001 rad/s, accel noise 0.001 m/s²
+- LIDAR: 64-ray cone scan (45° cone, 150m range)
+- AISensorSuite: 200+ dimensional observation space
 
 COORDINATE SYSTEM:
 - Vehicle origin at mid-height
@@ -34,13 +34,10 @@ USAGE:
 import os
 import numpy as np
 
-# Import common utilities
 from common_utils import setup_basilisk_path, mrp_to_dcm, mrp_to_quaternion
 
-# Import terrain simulation module
 from terrain_simulation import LunarRegolithModel
 
-# Add Basilisk to path (built in dist3 directory)
 setup_basilisk_path()
 
 from Basilisk.simulation import spacecraft, thrusterStateEffector, imuSensor
@@ -48,29 +45,24 @@ from Basilisk.simulation import fuelTank, dragDynamicEffector, exponentialAtmosp
 from Basilisk.utilities import SimulationBaseClass, macros, simIncludeGravBody, unitTestSupport
 from Basilisk.architecture import messaging
 
-# Import Starship HLS configuration constants
 import starship_constants as SC
 
 
-# ======================================================================
-# EXPORTED CLASSES (for use by lunar_lander_env.py)
-# ======================================================================
-
 class LIDARSensor:
     """
-    Simulated LIDAR sensor for terrain mapping and obstacle detection.
+    Simulated LIDAR sensor for terrain mapping.
+    
     Features:
     - Configurable scan pattern (cone angle, resolution)
     - Ray-casting against terrain heightmap
-    - Realistic noise model (range noise, dropout)
+    - Realistic noise model
     - Returns point cloud in body frame
-    - High performance (vectorized operations)
     """
     
     def __init__(self, terrain, max_range=100.0, cone_angle=30.0, num_rays=64):
         """
         Args:
-            terrain: LunarRegolithModel instance for ray-casting
+            terrain: LunarRegolithModel instance
             max_range: Maximum detection range in meters
             cone_angle: Cone half-angle in degrees (0 = nadir only)
             num_rays: Number of rays in scan pattern
