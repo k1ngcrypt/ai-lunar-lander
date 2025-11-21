@@ -1,8 +1,8 @@
 """
 Starship HLS (Human Landing System) Configuration Constants
 
-This module contains all physical and engineering constants for the Starship HLS
-lunar lander used in the Basilisk simulation environment.
+Physical and engineering constants for the Starship HLS lunar lander
+used in the Basilisk simulation environment.
 
 STARSHIP HLS CONFIGURATION:
 - Height: 50 m
@@ -14,14 +14,10 @@ STARSHIP HLS CONFIGURATION:
 
 import numpy as np
 
-# ==============================================================================
-# CELESTIAL BODY CONSTANTS
-# ==============================================================================
-
-# Moon radius (from Basilisk's gravBodyFactory.createMoon())
+# Moon radius (mean radius)
 # CRITICAL: Basilisk uses Moon-centered inertial coordinates
-# All positions in simulation are: z = MOON_RADIUS + terrain_height + altitude
-MOON_RADIUS = 1737400.0  # meters (mean radius of the Moon)
+# All positions: z = MOON_RADIUS + terrain_height + altitude
+MOON_RADIUS = 1737400.0  # meters
 
 # ==============================================================================
 # MASS PROPERTIES
@@ -53,30 +49,17 @@ INERTIA_TENSOR_FULL = np.array([
 # Center of mass offset (body frame)
 CENTER_OF_MASS_OFFSET = np.zeros(3)  # At vehicle geometric center
 
-# ==============================================================================
-# FUEL TANK CONFIGURATION
-# ==============================================================================
-
-# CH4 Tank (Methane)
 CH4_TANK_VOLUME = 617.005  # m³
 CH4_TANK_DENSITY = 422.8  # kg/m³
 CH4_TANK_RADIUS = (3.0 * CH4_TANK_VOLUME / (4.0 * np.pi)) ** (1.0/3.0)  # m
-CH4_TANK_POSITION = np.array([[0.0], [0.0], [-10.0]])  # Body frame position (aft section)
+CH4_TANK_POSITION = np.array([[0.0], [0.0], [-10.0]])  # Body frame (aft section)
 
-# LOX Tank (Liquid Oxygen)
 LOX_TANK_VOLUME = 823.077  # m³
 LOX_TANK_DENSITY = 1141.0  # kg/m³
 LOX_TANK_RADIUS = (3.0 * LOX_TANK_VOLUME / (4.0 * np.pi)) ** (1.0/3.0)  # m
-LOX_TANK_POSITION = np.array([[0.0], [0.0], [-5.0]])  # Body frame position (aft section)
+LOX_TANK_POSITION = np.array([[0.0], [0.0], [-5.0]])  # Body frame (aft section)
 
-# Propellant cylinder height (90% of vehicle)
-PROPELLANT_CYLINDER_HEIGHT = 45.0  # m (90% of 50m vehicle height)
-
-# ==============================================================================
-# PROPULSION SYSTEM
-# ==============================================================================
-
-# Engine performance
+PROPELLANT_CYLINDER_HEIGHT = 45.0  # m (90% of vehicle height)
 VACUUM_ISP = 375.0  # seconds - Raptor vacuum specific impulse
 STANDARD_GRAVITY = 9.80665  # m/s² - Standard gravitational acceleration
 MAX_THRUST_PER_ENGINE = 2500000.0  # N - Maximum thrust per Raptor engine
@@ -101,90 +84,68 @@ PRIMARY_ENGINE_DIRECTION = np.array([0., 0., 1.])
 PRIMARY_ENGINE_COUNT = 3
 PRIMARY_ENGINE_START_INDEX = 0
 
-# ==============================================================================
-# ATTITUDE CONTROL THRUSTERS
-# ==============================================================================
-
-# Mid-body thrusters (12 thrusters for attitude control)
-# Positioned at radius 4.0 m, z = 0.0 m (mid-height)
-MIDBODY_THRUST = 20000.0  # N - Thrust per mid-body thruster
-MIDBODY_RADIUS = 4.0  # m - Radial distance from centerline
-MIDBODY_Z_POSITION = 0.0  # m - Mid-height of vehicle
+# Mid-body thrusters: 12 at radius 4.0 m, z = 0.0 m
+MIDBODY_THRUST = 20000.0  # N
+MIDBODY_RADIUS = 4.0  # m
+MIDBODY_Z_POSITION = 0.0  # m
 
 MIDBODY_THRUSTER_POSITIONS = [
-    np.array([4.000, 0.000, 0.000]),    # M1
-    np.array([3.464, 2.000, 0.000]),    # M2
-    np.array([2.000, 3.464, 0.000]),    # M3
-    np.array([0.000, 4.000, 0.000]),    # M4
-    np.array([-2.000, 3.464, 0.000]),   # M5
-    np.array([-3.464, 2.000, 0.000]),   # M6
-    np.array([-4.000, 0.000, 0.000]),   # M7
-    np.array([-3.464, -2.000, 0.000]),  # M8
-    np.array([-2.000, -3.464, 0.000]),  # M9
-    np.array([0.000, -4.000, 0.000]),   # M10
-    np.array([2.000, -3.464, 0.000]),   # M11
-    np.array([3.464, -2.000, 0.000])    # M12
+    np.array([4.000, 0.000, 0.000]),
+    np.array([3.464, 2.000, 0.000]),
+    np.array([2.000, 3.464, 0.000]),
+    np.array([0.000, 4.000, 0.000]),
+    np.array([-2.000, 3.464, 0.000]),
+    np.array([-3.464, 2.000, 0.000]),
+    np.array([-4.000, 0.000, 0.000]),
+    np.array([-3.464, -2.000, 0.000]),
+    np.array([-2.000, -3.464, 0.000]),
+    np.array([0.000, -4.000, 0.000]),
+    np.array([2.000, -3.464, 0.000]),
+    np.array([3.464, -2.000, 0.000])
 ]
 
 MIDBODY_THRUSTER_COUNT = 12
 MIDBODY_THRUSTER_START_INDEX = PRIMARY_ENGINE_COUNT
 
-# RCS thrusters (24 thrusters: 12 at top ring, 12 at bottom ring)
-# 2,000 N each, positioned at radius 4.2 m
-RCS_THRUST = 2000.0  # N - Thrust per RCS thruster
-RCS_RADIUS = 4.2  # m - Radial distance from centerline
-RCS_TOP_Z = 22.5  # m - Top ring height
-RCS_BOTTOM_Z = -22.5  # m - Bottom ring height
+# RCS thrusters: 24 total (12 at each ring), 2,000 N each, radius 4.2 m
+RCS_THRUST = 2000.0  # N
+RCS_RADIUS = 4.2  # m
+RCS_TOP_Z = 22.5  # m
+RCS_BOTTOM_Z = -22.5  # m
 
 RCS_THRUSTER_POSITIONS = [
-    # Ring 1 (top, z = 22.5 m)
-    np.array([4.200, 0.000, 22.500]),    # R1
-    np.array([3.637, 2.100, 22.500]),    # R2
-    np.array([2.100, 3.637, 22.500]),    # R3
-    np.array([0.000, 4.200, 22.500]),    # R4
-    np.array([-2.100, 3.637, 22.500]),   # R5
-    np.array([-3.637, 2.100, 22.500]),   # R6
-    np.array([-4.200, 0.000, 22.500]),   # R7
-    np.array([-3.637, -2.100, 22.500]),  # R8
-    np.array([-2.100, -3.637, 22.500]),  # R9
-    np.array([0.000, -4.200, 22.500]),   # R10
-    np.array([2.100, -3.637, 22.500]),   # R11
-    np.array([3.637, -2.100, 22.500]),   # R12
-    # Ring 2 (bottom, z = -22.5 m)
-    np.array([4.200, 0.000, -22.500]),   # R13
-    np.array([3.637, 2.100, -22.500]),   # R14
-    np.array([2.100, 3.637, -22.500]),   # R15
-    np.array([0.000, 4.200, -22.500]),   # R16
-    np.array([-2.100, 3.637, -22.500]),  # R17
-    np.array([-3.637, 2.100, -22.500]),  # R18
-    np.array([-4.200, 0.000, -22.500]),  # R19
-    np.array([-3.637, -2.100, -22.500]), # R20
-    np.array([-2.100, -3.637, -22.500]), # R21
-    np.array([0.000, -4.200, -22.500]),  # R22
-    np.array([2.100, -3.637, -22.500]),  # R23
-    np.array([3.637, -2.100, -22.500])   # R24
+    # Top ring (z = 22.5 m)
+    np.array([4.200, 0.000, 22.500]),
+    np.array([3.637, 2.100, 22.500]),
+    np.array([2.100, 3.637, 22.500]),
+    np.array([0.000, 4.200, 22.500]),
+    np.array([-2.100, 3.637, 22.500]),
+    np.array([-3.637, 2.100, 22.500]),
+    np.array([-4.200, 0.000, 22.500]),
+    np.array([-3.637, -2.100, 22.500]),
+    np.array([-2.100, -3.637, 22.500]),
+    np.array([0.000, -4.200, 22.500]),
+    np.array([2.100, -3.637, 22.500]),
+    np.array([3.637, -2.100, 22.500]),
+    # Bottom ring (z = -22.5 m)
+    np.array([4.200, 0.000, -22.500]),
+    np.array([3.637, 2.100, -22.500]),
+    np.array([2.100, 3.637, -22.500]),
+    np.array([0.000, 4.200, -22.500]),
+    np.array([-2.100, 3.637, -22.500]),
+    np.array([-3.637, 2.100, -22.500]),
+    np.array([-4.200, 0.000, -22.500]),
+    np.array([-3.637, -2.100, -22.500]),
+    np.array([-2.100, -3.637, -22.500]),
+    np.array([0.000, -4.200, -22.500]),
+    np.array([2.100, -3.637, -22.500]),
+    np.array([3.637, -2.100, -22.500])
 ]
 
 RCS_THRUSTER_COUNT = 24
 RCS_THRUSTER_START_INDEX = MIDBODY_THRUSTER_START_INDEX + MIDBODY_THRUSTER_COUNT
 
-# Total thruster count
 TOTAL_THRUSTER_COUNT = PRIMARY_ENGINE_COUNT + MIDBODY_THRUSTER_COUNT + RCS_THRUSTER_COUNT  # 39
-
-# ==============================================================================
-# VEHICLE GEOMETRY
-# ==============================================================================
-
-VEHICLE_HEIGHT = 50.0  # m - Total vehicle height
-VEHICLE_DIAMETER = 9.0  # m - Vehicle diameter
-VEHICLE_RADIUS = VEHICLE_DIAMETER / 2.0  # 4.5 m
-
-# ==============================================================================
-# LANDING GEAR CONFIGURATION
-# ==============================================================================
-
-# Landing leg positions (body frame)
-# 4 legs positioned symmetrically around vehicle base
 LEG_RADIUS = 4.5  # m - Radial distance from centerline
 LEG_Z_ATTACH = -24.0  # m - Attachment point height
 LEG_LENGTH = 3.0  # m - Extended leg length
@@ -207,19 +168,15 @@ LANDING_LEG_COUNT = 4
 REFERENCE_AREA = np.pi * VEHICLE_RADIUS**2  # m² - Cross-sectional area
 
 # Drag coefficient (approximate for cylindrical body)
-DRAG_COEFFICIENT = 0.82  # Dimensionless - typical for cylinder
+DRAG_COEFFICIENT = 0.82  # Typical for cylinder
 
-# ==============================================================================
-# HELPER FUNCTIONS
-# ==============================================================================
 
 def get_midbody_thruster_direction(position):
     """
-    Calculate the thrust direction for a mid-body thruster.
-    Direction is radially outward for attitude control.
+    Calculate thrust direction for mid-body thruster (radially outward).
     
     Args:
-        position: np.array([x, y, z]) position in body frame
+        position: np.array([x, y, z]) in body frame
         
     Returns:
         np.array([x, y, z]) normalized direction vector
@@ -229,11 +186,10 @@ def get_midbody_thruster_direction(position):
 
 def get_rcs_thruster_direction(position):
     """
-    Calculate the thrust direction for an RCS thruster.
-    Direction is radially outward for attitude control.
+    Calculate thrust direction for RCS thruster (radially outward).
     
     Args:
-        position: np.array([x, y, z]) position in body frame
+        position: np.array([x, y, z]) in body frame
         
     Returns:
         np.array([x, y, z]) normalized direction vector
@@ -276,7 +232,5 @@ def print_configuration_summary():
     print(f"  Landing legs:          {LANDING_LEG_COUNT} x {LEG_LENGTH:.1f} m")
     print("="*70)
 
-
 if __name__ == "__main__":
-    # Print configuration when run directly
     print_configuration_summary()

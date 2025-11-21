@@ -1,7 +1,7 @@
 import numpy as np
 import open3d as o3d
 
-heightmap = np.load("generated_terrain/moon_terrain.npy")  # from generate_terrain.py
+heightmap = np.load("generated_terrain/moon_terrain.npy")
 rows, cols = heightmap.shape
 X, Y = np.meshgrid(np.arange(cols), np.arange(rows))
 Z = heightmap
